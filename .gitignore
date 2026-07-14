@@ -1,0 +1,17 @@
+# 运行时日志
+*.log
+
+# 运行时状态 / 缓存 / 个人数据
+*.state.json
+usage-history.jsonl
+np-cover.img
+
+# 依赖（当前零依赖，未来加了也别提交）
+node_modules/
+
+# 系统
+.DS_Store
+Thumbs.db
+
+# 说明：真正的密钥（Claude OAuth token）在仓库外的
+# ~/.claude/.credentials.json，运行时读取，从不进本仓库。

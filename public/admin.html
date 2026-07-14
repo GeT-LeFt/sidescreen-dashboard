@@ -1,0 +1,902 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>副屏管理台</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/widgets.css">
+<style>
+  :root {
+    --bg: #f5f5f7;
+    --card: #ffffff;
+    --line: #d2d2d7;
+    --ink: #1d1d1f;
+    --ink2: #515154;
+    --mutd: #86868b;
+    --blue: #0071e3;
+    --green: #34c759;
+    --red: #ff3b30;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    background: var(--bg); color: var(--ink);
+    font-family: -apple-system, "SF Pro Display", "SF Pro Text", system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    min-height: 100vh; padding: 0 clamp(14px, 3vw, 40px) 60px;
+  }
+  header { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 20px 2px 14px; }
+  h1 { font-size: 24px; font-weight: 700; letter-spacing: -.3px; }
+  .sub { font-size: 13px; color: var(--mutd); }
+  .spacer { flex: 1; }
+  #saveState { font-size: 13px; color: var(--mutd); transition: .2s; }
+  #saveState.ok { color: var(--green); }
+  .btn {
+    font: inherit; font-size: 14px; padding: 8px 18px; border-radius: 980px; cursor: pointer;
+    border: 1px solid var(--line); background: #fff; color: var(--ink); transition: .15s;
+  }
+  .btn:hover { border-color: #b8b8bd; }
+  .btn.blue { background: var(--blue); border-color: var(--blue); color: #fff; font-weight: 500; }
+  .btn.blue:hover { background: #0077ed; }
+  .btn.danger { color: var(--red); }
+  .btn.sm { padding: 5px 13px; font-size: 13px; }
+
+  /* 顶层视图切换 */
+  .viewSeg { display: flex; background: #e9e9ec; border-radius: 12px; padding: 3px; gap: 3px; }
+  .viewSeg button {
+    font: inherit; font-size: 14px; padding: 7px 22px; border: none; border-radius: 9px;
+    background: transparent; color: var(--ink2); cursor: pointer; font-weight: 500;
+  }
+  .viewSeg button.on { background: #fff; color: var(--ink); font-weight: 600; box-shadow: 0 1px 5px rgba(0,0,0,.12); }
+
+  .card {
+    background: var(--card); border-radius: 18px; padding: 18px 20px;
+    box-shadow: 0 1px 2px rgba(0,0,0,.04), 0 6px 20px rgba(0,0,0,.05);
+  }
+  .card h2 { font-size: 15px; font-weight: 650; margin-bottom: 6px; }
+  .card .desc { font-size: 12.5px; color: var(--mutd); margin-bottom: 10px; }
+
+  .row { display: flex; align-items: center; gap: 12px; padding: 11px 0; border-bottom: 1px solid #f0f0f2; }
+  .row:last-child { border-bottom: none; }
+  .row .lbl { flex: 1; font-size: 14px; }
+  .row .lbl small { display: block; color: var(--mutd); font-size: 12px; margin-top: 1px; }
+  .row code { font-size: 12.5px; color: var(--ink2); background: #f5f5f7; padding: 3px 8px; border-radius: 6px; }
+
+  .switch { position: relative; width: 50px; height: 30px; flex: none; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .switch i { position: absolute; inset: 0; border-radius: 999px; background: #e9e9eb; transition: .22s; cursor: pointer; }
+  .switch i::after {
+    content: ''; position: absolute; left: 2px; top: 2px; width: 26px; height: 26px; border-radius: 50%;
+    background: #fff; box-shadow: 0 2px 6px rgba(0,0,0,.2); transition: .22s;
+  }
+  .switch input:checked + i { background: var(--green); }
+  .switch input:checked + i::after { transform: translateX(20px); }
+
+  input[type=range] { width: 100%; accent-color: var(--blue); }
+  input[type=text], input:not([type]), textarea {
+    font: inherit; font-size: 14px; border: 1px solid var(--line); border-radius: 10px;
+    padding: 8px 11px; background: #fafafa; width: 100%;
+  }
+  textarea { min-height: 74px; resize: vertical; }
+
+  .seg { display: flex; background: #ececee; border-radius: 10px; padding: 2px; gap: 2px; }
+  .seg button {
+    flex: 1; font: inherit; font-size: 12.5px; padding: 6px 0; border: none; border-radius: 8px;
+    background: transparent; color: var(--ink2); cursor: pointer; white-space: nowrap;
+  }
+  .seg button.on { background: #fff; color: var(--ink); font-weight: 600; box-shadow: 0 1px 4px rgba(0,0,0,.12); }
+
+  .swatches { display: flex; gap: 10px; align-items: center; padding: 6px 0; }
+  .sw { width: 30px; height: 30px; border-radius: 50%; cursor: pointer; border: 2px solid transparent; transition: .15s; }
+  .sw.on { border-color: var(--blue); box-shadow: 0 0 0 3px rgba(0,113,227,.15); }
+  input[type=color] { width: 30px; height: 30px; border: none; background: none; cursor: pointer; padding: 0; }
+
+  .dev { display: flex; align-items: center; gap: 10px; padding: 9px 0; border-bottom: 1px solid #f0f0f2; font-size: 13.5px; }
+  .dev:last-child { border-bottom: none; }
+  .dev .st { font-size: 11.5px; padding: 2px 10px; border-radius: 999px; background: #f0f0f2; color: var(--ink2); }
+  .dev .st.busy { background: rgba(52,199,89,.14); color: #1d8f43; }
+  .dev .st.perm { background: rgba(255,159,10,.16); color: #b06b00; }
+  details summary { cursor: pointer; font-size: 13px; color: var(--blue); padding: 6px 0; }
+  pre {
+    font-family: "SF Mono", Consolas, monospace; font-size: 11.5px; line-height: 1.5;
+    background: #f5f5f7; border-radius: 10px; padding: 10px; overflow-x: auto; margin-top: 6px;
+  }
+
+  /* ===== 页面布局视图 ===== */
+  .layout2 { display: grid; grid-template-columns: minmax(0, 1fr) 330px; gap: 18px; align-items: start; }
+  @media (max-width: 1080px) { .layout2 { grid-template-columns: 1fr; } }
+
+  .tabs { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; align-items: center; }
+  .tab {
+    font: inherit; font-size: 14px; padding: 7px 18px; border-radius: 980px; cursor: pointer;
+    border: 1px solid var(--line); background: #fff; color: var(--ink2);
+  }
+  .tab.on { background: var(--ink); border-color: var(--ink); color: #fff; font-weight: 550; }
+  .tab.add { border-style: dashed; color: var(--mutd); }
+
+  #stageWrap { display: flex; flex-direction: column; align-items: center; }
+  #bezel { background: #111; border-radius: 22px; padding: 14px; box-shadow: 0 14px 40px rgba(0,0,0,.22); }
+  #stage {
+    position: relative; width: min(640px, 56vw); aspect-ratio: 3/2;
+    background: radial-gradient(700px 380px at 15% -10%, #17171a 0%, transparent 60%), #0b0b0a;
+    border-radius: 10px; overflow: hidden; touch-action: none;
+  }
+  @media (max-width: 1080px) { #stage { width: min(640px, 88vw); } }
+  #stage .gridline { position: absolute; background: rgba(255,255,255,.05); pointer-events: none; }
+  .sp { position: absolute; cursor: grab; user-select: none; border-radius: 8px; }
+  .sp .tilebox { position: absolute; inset: 0; pointer-events: none; }
+  .sp .tilebox .tile { transition: none; }
+  .sp:hover { box-shadow: 0 0 0 2px rgba(0,113,227,.55); }
+  .sp.sel { box-shadow: 0 0 0 2.5px var(--blue), 0 6px 22px rgba(0,0,0,.45); z-index: 5; }
+  .sp.drag { opacity: .88; cursor: grabbing; z-index: 10; box-shadow: 0 0 0 2px var(--blue), 0 10px 26px rgba(0,0,0,.5); }
+  .sp.bad { box-shadow: 0 0 0 2px var(--red) !important; }
+  .sp .x {
+    position: absolute; top: -7px; right: -7px; width: 20px; height: 20px; border-radius: 50%;
+    background: #3a3a38; color: #ddd; border: 1px solid rgba(255,255,255,.25);
+    font-size: 11px; line-height: 18px; text-align: center; cursor: pointer; display: none; z-index: 6;
+  }
+  .sp:hover .x, .sp.sel .x { display: block; }
+  .sp .rs {
+    position: absolute; right: 1px; bottom: 1px; width: 16px; height: 16px; cursor: nwse-resize; z-index: 6;
+    border-right: 3px solid rgba(255,255,255,.45); border-bottom: 3px solid rgba(255,255,255,.45);
+    border-radius: 0 0 5px 0;
+  }
+  @keyframes shake { 0%,100%{transform:translateX(0)} 25%{transform:translateX(-5px)} 75%{transform:translateX(5px)} }
+  .sp.shake { animation: shake .3s; }
+  /* 选中面板里可拖动的字段 */
+  .fld-hot { outline: 1.5px dashed rgba(57,135,229,.85); outline-offset: 2px; cursor: move; }
+  .fld-hot:hover { outline-color: #6db1ff; background: rgba(57,135,229,.08); }
+
+  .palette { margin-top: 16px; }
+  .palGroup { margin-bottom: 10px; }
+  .palCat { font-size: 12px; font-weight: 650; color: var(--mutd); text-align: center; margin-bottom: 6px; letter-spacing: .5px; }
+  .palRow { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+  .pal {
+    font: inherit; font-size: 13px; padding: 8px 14px; border-radius: 12px; cursor: pointer;
+    border: 1px solid var(--line); background: #fff; display: flex; align-items: center; gap: 6px;
+  }
+  .pal:hover { border-color: var(--blue); color: var(--blue); }
+  .pageActs { display: flex; gap: 10px; margin-top: 16px; flex-wrap: wrap; justify-content: center; }
+
+  /* 检查器 */
+  .inspCol { position: sticky; top: 14px; }
+  #inspEmpty { color: var(--mutd); font-size: 13.5px; padding: 26px 4px; text-align: center; }
+  .insp-head { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .insp-head h2 { flex: 1; font-size: 16px; }
+  .insp-hint { font-size: 12px; color: var(--mutd); background: #f5f5f7; border-radius: 8px; padding: 7px 10px; margin: 8px 0 4px; }
+  .fldGroup { padding: 9px 0 4px; border-bottom: 1px solid #f0f0f2; }
+  .fldGroup:last-child { border-bottom: none; }
+  .fldRow { display: flex; justify-content: space-between; font-size: 13.5px; margin-bottom: 5px; }
+  .fldRow b { color: var(--blue); font-variant-numeric: tabular-nums; }
+  .alignSeg { display: flex; background: #ececee; border-radius: 8px; padding: 2px; gap: 2px; margin-top: 7px; }
+  .alignSeg button {
+    flex: 1; font: inherit; font-size: 12px; padding: 4px 0; border: none; border-radius: 6px;
+    background: transparent; color: var(--ink2); cursor: pointer;
+  }
+  .alignSeg button.on { background: #fff; color: var(--ink); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.12); }
+  #inspTextWrap input, #inspTextWrap textarea { margin-top: 8px; }
+  .stepper { display: flex; align-items: center; gap: 10px; }
+  .stepper button {
+    font: inherit; width: 34px; height: 30px; border-radius: 9px; border: 1px solid var(--line);
+    background: #fff; cursor: pointer; font-size: 15px;
+  }
+  .stepper b { min-width: 54px; text-align: center; font-variant-numeric: tabular-nums; }
+
+  /* ===== 系统设置视图 ===== */
+  #viewSettings { display: none; }
+  .setGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 16px; align-items: start; }
+  #wxResults { margin-top: 8px; display: flex; flex-direction: column; gap: 6px; }
+  #wxResults button {
+    font: inherit; font-size: 13px; text-align: left; padding: 8px 12px; border-radius: 10px;
+    border: 1px solid var(--line); background: #fff; cursor: pointer;
+  }
+  #wxResults button:hover { border-color: var(--blue); color: var(--blue); }
+
+  /* 非阻塞提示条 */
+  #toast {
+    position: fixed; left: 50%; bottom: 26px; transform: translate(-50%, 24px);
+    background: #1d1d1f; color: #fff; font-size: 13.5px; padding: 10px 20px; border-radius: 12px;
+    box-shadow: 0 10px 34px rgba(0,0,0,.28); opacity: 0; pointer-events: none; transition: .28s; z-index: 200;
+  }
+  #toast.on { opacity: 1; transform: translate(-50%, 0); }
+</style>
+</head>
+<body>
+<header>
+  <h1>副屏管理台</h1>
+  <span class="sub" id="devLine">ProArt 副屏 · 960×640</span>
+  <span class="spacer"></span>
+  <span id="saveState"></span>
+  <div class="viewSeg" id="viewSeg">
+    <button data-v="layout" class="on">页面布局</button>
+    <button data-v="settings">系统设置</button>
+  </div>
+  <button class="btn" id="btnReload" title="重启副屏上的浏览器画面">🔄 刷新副屏</button>
+  <a class="btn" href="/" target="_blank">打开仪表盘</a>
+</header>
+
+<!-- ================= 页面布局 ================= -->
+<div id="viewLayout">
+  <div class="layout2">
+    <main>
+      <section class="card">
+        <div class="tabs" id="tabs"></div>
+        <div id="stageWrap">
+          <div id="bezel"><div id="stage"></div></div>
+          <div class="palette" id="palette"></div>
+          <div class="pageActs">
+            <button class="btn blue" id="btnCast">📺 投放此页到副屏</button>
+            <button class="btn" id="btnRename">重命名</button>
+            <button class="btn danger" id="btnDelPage">删除此页</button>
+          </div>
+          <div class="sub" style="margin-top:10px">拖动移动 · 右下角拖格子 · 单击选中后在右侧调整 · 选中后可直接拖动面板里的文字</div>
+        </div>
+      </section>
+    </main>
+    <aside class="inspCol">
+      <section class="card">
+        <div id="inspEmpty">👈 单击舞台上的面板<br>在这里调整它的大小与样式</div>
+        <div id="inspBody" style="display:none">
+          <div class="insp-head"><h2 id="inspTitle">面板</h2><button class="btn sm danger" id="inspDel">删除</button></div>
+          <div class="insp-hint">💡 拖左侧预览里的虚线文字可直接改位置;下面的滑块实时生效(副屏同步)</div>
+          <div class="fldGroup">
+            <div class="fldRow"><span>整体大小</span><b id="inspScaleVal">100%</b></div>
+            <input type="range" id="inspScale" min="60" max="200" step="5" value="100">
+          </div>
+          <div id="inspTextWrap" style="display:none">
+            <input id="inspTitleInp" placeholder="标题">
+            <textarea id="inspContent" placeholder="内容,支持换行"></textarea>
+          </div>
+          <div id="inspFields"></div>
+          <button class="btn sm" id="inspReset" style="margin-top:12px">重置此面板样式</button>
+        </div>
+      </section>
+    </aside>
+  </div>
+</div>
+
+<!-- ================= 系统设置 ================= -->
+<div id="toast"></div>
+
+<div id="viewSettings">
+  <div class="setGrid">
+    <section class="card">
+      <h2>常规</h2>
+      <div class="row">
+        <span class="lbl">开机自启<small>登录 Windows 后自动启动</small></span>
+        <label class="switch"><input type="checkbox" id="autostart"><i></i></label>
+      </div>
+      <div class="row"><span class="lbl">管理地址</span><code id="adminUrl">…</code></div>
+      <div class="row"><span class="lbl">版本</span><code id="ver">…</code></div>
+    </section>
+
+    <section class="card">
+      <h2>屏幕亮度</h2>
+      <div class="desc">经 DDC/CI 直接写入屏幕 · 当前 <b id="brightVal">–</b>/100</div>
+      <input type="range" id="bright" min="0" max="100" step="20">
+    </section>
+
+    <section class="card">
+      <h2>轮换与翻页</h2>
+      <div class="row" style="display:block">
+        <span class="lbl" style="display:block;margin-bottom:8px">自动轮换<small>每隔一段时间自动切到下一页</small></span>
+        <div class="seg" id="segInterval"></div>
+      </div>
+      <div class="row">
+        <span class="lbl">亮度键翻页<small>物理按钮按一下切下一页(有提醒时先确认)</small></span>
+        <label class="switch"><input type="checkbox" id="keyCycles"><i></i></label>
+      </div>
+      <div class="row">
+        <span class="lbl">键盘热键翻页<small>全局有效 · 当前: <b id="hkLabel">未设定</b></small></span>
+        <label class="switch"><input type="checkbox" id="hkEnabled"><i></i></label>
+      </div>
+      <div class="row">
+        <span class="lbl">热键组合</span>
+        <button class="btn sm" id="hkCapture">点击设定</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>外观</h2>
+      <div class="desc">主色应用于走势图、额度条与页码点</div>
+      <div class="swatches" id="swatches"></div>
+    </section>
+
+    <section class="card">
+      <h2>数据与显示</h2>
+      <div class="row" style="display:block">
+        <span class="lbl" style="display:block;margin-bottom:8px">额度刷新间隔<small>被限流时会自动退避,恢复后回到所选间隔</small></span>
+        <div class="seg" id="segUsage"></div>
+      </div>
+      <div class="row">
+        <span class="lbl">时钟显示秒</span>
+        <label class="switch"><input type="checkbox" id="clkSec"><i></i></label>
+      </div>
+      <div class="row">
+        <span class="lbl">切页显示页名<small>切换页面时短暂显示页面名称后淡出</small></span>
+        <label class="switch"><input type="checkbox" id="pgToast"><i></i></label>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>组件数据源</h2>
+      <div class="row" style="display:block">
+        <span class="lbl">天气城市 <small id="wxCur">未设置</small></span>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <input id="wxCity" placeholder="输入城市名, 如: 深圳 / 香港">
+          <button class="btn sm" id="wxSearch" style="flex:none">查找</button>
+        </div>
+        <div id="wxResults"></div>
+      </div>
+      <div class="row" style="display:block">
+        <span class="lbl">日程 ICS 订阅<small>Google/Outlook 日历的 ICS 地址, webcal:// 也可以</small></span>
+        <input id="icsUrl" placeholder="https://calendar.google.com/.../basic.ics" style="margin-top:8px">
+      </div>
+      <div class="row" style="display:block">
+        <span class="lbl">网速 Ping 主机<small>网速面板延迟测试目标</small></span>
+        <input id="pingHost" placeholder="223.5.5.5" style="margin-top:8px">
+      </div>
+      <div class="row">
+        <span class="lbl">手机通知监听<small id="nfStatus">需 Phone Link 同步 + Windows 通知访问权限</small></span>
+        <label class="switch"><input type="checkbox" id="nfEnabled"><i></i></label>
+      </div>
+      <div class="row">
+        <span class="lbl">歌词 · 正在播放<small>读系统"正在播放"(SMTC), 联网实时查词, 不保存</small></span>
+        <label class="switch"><input type="checkbox" id="lyEnabled"><i></i></label>
+      </div>
+      <div class="row">
+        <span class="lbl">歌词时间微调<small>歌词偏快调负值, 偏慢调正值</small></span>
+        <div class="stepper">
+          <button id="lyOffMinus">−</button><b id="lyOffVal">0.0s</b><button id="lyOffPlus">＋</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>接入的设备</h2>
+      <div id="devices"><span class="sub">加载中…</span></div>
+      <details>
+        <summary>如何接入 Mac 的 Claude 状态</summary>
+        <div class="sub" style="padding:4px 0">把下面的 hooks 合并进 Mac 的 <code>~/.claude/settings.json</code>:</div>
+        <pre id="macSnippet"></pre>
+      </details>
+    </section>
+  </div>
+</div>
+
+<script src="/widgets.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const esc = W.esc;
+let CFG = null, curPage = 0, saveTimer = null;
+let selIdx = -1;            // 当前选中的面板
+let spEls = [];             // 舞台上的 .sp 元素(与 panels 同序)
+const LIVE = { stats: null, claude: null, extras: null, np: null };
+
+// 真实屏坐标常量(960×640, padding 12, gap 10) —— 舞台是它的等比缩放
+const R = { PAD: 12, GAP: 10, CW: 226.5, CH: 146.5 };
+const zoomOf = () => $('stage').clientWidth / 960;
+const realW = p => p.w * R.CW + (p.w - 1) * R.GAP;
+const realH = p => p.h * R.CH + (p.h - 1) * R.GAP;
+
+// 面板分类(管理台调色板按类分组, 不再一长条)
+const PALETTE_GROUPS = [
+  ['性能监控', ['gpu', 'cpu', 'ram', 'net', 'disk', 'diskio', 'fan', 'gpupower', 'vram', 'gpuclock', 'cpuclock', 'uptime', 'procs']],
+  ['Claude',   ['pet', 'usage']],
+  ['信息',     ['clock', 'weather', 'calendar', 'notify', 'lyrics']],
+  ['自定义',   ['text']],
+];
+const DEFAULT_WH = {
+  clock: [2, 1], text: [2, 1], disk: [2, 1], net: [2, 1], diskio: [2, 1],
+  gpu: [2, 2], usage: [2, 2], pet: [2, 2], weather: [2, 2], calendar: [2, 2], notify: [2, 2], lyrics: [2, 2],
+  cpu: [1, 1], ram: [1, 1], fan: [1, 1], gpupower: [1, 1], vram: [1, 1], gpuclock: [1, 1], cpuclock: [1, 1], uptime: [1, 1], procs: [1, 1],
+};
+const SWATCH = ['#d97757', '#3987e5', '#1baf7a', '#9085e9', '#e87ba4', '#fab219'];
+const INTERVALS = [[0, '关'], [10, '10秒'], [30, '30秒'], [60, '1分'], [300, '5分']];
+const USAGE_IV = [[1, '1分'], [5, '5分'], [15, '15分'], [30, '30分']];
+
+let toastTimer = null;
+function toast(msg) {
+  const el = $('toast'); el.textContent = msg; el.classList.add('on');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('on'), 2200);
+}
+function markSaving() { $('saveState').textContent = '保存中…'; $('saveState').classList.remove('ok'); }
+function markSaved() { $('saveState').textContent = '已保存 ✓'; $('saveState').classList.add('ok'); }
+function queueSave() {
+  markSaving();
+  clearTimeout(saveTimer);
+  saveTimer = setTimeout(async () => {
+    const r = await fetch('/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(CFG) });
+    r.ok ? markSaved() : $('saveState').textContent = '保存失败';
+  }, 500);
+}
+
+/* ---------- 顶层视图切换 ---------- */
+$('viewSeg').querySelectorAll('button').forEach(b => b.onclick = () => {
+  $('viewSeg').querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+  $('viewLayout').style.display = b.dataset.v === 'layout' ? '' : 'none';
+  $('viewSettings').style.display = b.dataset.v === 'settings' ? 'block' : 'none';
+});
+$('btnReload').onclick = async () => {
+  $('btnReload').textContent = '🔄 刷新中…';
+  await fetch('/api/system/reload-kiosk', { method: 'POST' });
+  setTimeout(() => { $('btnReload').textContent = '🔄 刷新副屏'; }, 4000);
+};
+
+/* ---------- 舞台: 真实渲染 + 拖拽 ---------- */
+function pxRect(p) {
+  const z = zoomOf();
+  return {
+    left: (R.PAD + p.x * (R.CW + R.GAP)) * z,
+    top: (R.PAD + p.y * (R.CH + R.GAP)) * z,
+    width: realW(p) * z,
+    height: realH(p) * z,
+  };
+}
+function overlaps(a, b) { return a.x < b.x + b.w && b.x < a.x + a.w && a.y < b.y + b.h && b.y < a.y + a.h; }
+function collides(pg, idx, cand) { return pg.panels.some((q, j) => j !== idx && overlaps(cand, { x: q.x, y: q.y, w: q.w, h: q.h })); }
+
+// 把面板渲染成"真实 tile"(真尺寸 + zoom 缩放), 与副屏画面像素级一致
+function renderTileInto(sp, p, idx) {
+  const z = zoomOf();
+  const sz = W.sizeClass(p);
+  const inner = (W.RENDER[p.type] || (() => `<div class="label">未知 ${esc(p.type)}</div>`))(p, sz);
+  const scale = (typeof p.scale === 'number' && p.scale > 0) ? p.scale : 1;
+  sp.querySelector('.tilebox').innerHTML =
+    `<div class="tile panel-${p.type} ${sz}" style="width:${realW(p)}px;height:${realH(p)}px;zoom:${z}">` +
+    (scale === 1 ? inner : `<div class="tile-content" style="zoom:${scale}">${inner}</div>`) + '</div>';
+  const tile = sp.querySelector('.tile');
+  W.applyFieldLayout(tile, p);
+  refreshTileData(sp);
+  if (idx === selIdx) decorateFields(sp, p, idx);
+}
+function refreshTileData(root) {
+  if (LIVE.stats) W.updateStats(root, LIVE.stats);
+  if (LIVE.claude) W.updateUsage(root, LIVE.claude);
+  if (LIVE.extras) W.updateExtras(root, LIVE.extras);
+  if (LIVE.np) W.updateNowPlaying(root, LIVE.np);
+  W.updateClock(root, CFG);
+}
+
+function renderStage() {
+  const st = $('stage');
+  st.innerHTML = '';
+  spEls = [];
+  const z = zoomOf();
+  st.style.setProperty('--accent', (CFG.theme && CFG.theme.accent) || '#3987e5');
+  for (let i = 1; i < 4; i++) {
+    const v = document.createElement('div'); v.className = 'gridline';
+    v.style.cssText = `left:${(R.PAD + i * (R.CW + R.GAP) - R.GAP / 2) * z}px;top:0;bottom:0;width:1px`;
+    const h = document.createElement('div'); h.className = 'gridline';
+    h.style.cssText = `top:${(R.PAD + i * (R.CH + R.GAP) - R.GAP / 2) * z}px;left:0;right:0;height:1px`;
+    st.append(v, h);
+  }
+  const pg = CFG.pages[curPage];
+  pg.panels.forEach((p, i) => {
+    if (!Number.isInteger(p.x)) { p.x = 0; p.y = 0; }
+    const d = document.createElement('div');
+    d.className = 'sp' + (i === selIdx ? ' sel' : '');
+    d.innerHTML = `<div class="tilebox"></div><span class="x" title="删除">✕</span><span class="rs"></span>`;
+    Object.assign(d.style, Object.fromEntries(Object.entries(pxRect(p)).map(([k, v]) => [k, v + 'px'])));
+    st.appendChild(d);
+    spEls.push(d);
+    renderTileInto(d, p, i);
+    bindDrag(d, i);
+  });
+  // 点空白处取消选中
+  st.onpointerdown = e => { if (e.target === st || e.target.classList.contains('gridline')) select(-1); };
+}
+
+function bindDrag(el, idx) {
+  const pg = () => CFG.pages[curPage];
+  let mode = null, startPx = null, orig = null, moved = false;
+
+  el.addEventListener('pointerdown', e => {
+    if (e.target.classList.contains('x') || e.target.classList.contains('fld-hot')) return;
+    mode = e.target.classList.contains('rs') ? 'resize' : 'move';
+    startPx = { x: e.clientX, y: e.clientY };
+    const p = pg().panels[idx];
+    orig = { x: p.x, y: p.y, w: p.w, h: p.h };
+    moved = false;
+    el.setPointerCapture(e.pointerId);
+    el.classList.add('drag');
+    e.preventDefault();
+  });
+  el.addEventListener('pointermove', e => {
+    if (!mode) return;
+    const z = zoomOf();
+    const dx = e.clientX - startPx.x, dy = e.clientY - startPx.y;
+    if (Math.abs(dx) + Math.abs(dy) > 4) moved = true;
+    const p = pg().panels[idx];
+    let cand;
+    if (mode === 'move') {
+      const nx = Math.max(0, Math.min(4 - orig.w, Math.round(orig.x + dx / ((R.CW + R.GAP) * z))));
+      const ny = Math.max(0, Math.min(4 - orig.h, Math.round(orig.y + dy / ((R.CH + R.GAP) * z))));
+      cand = { x: nx, y: ny, w: orig.w, h: orig.h };
+    } else {
+      const nw = Math.max(1, Math.min(4 - orig.x, Math.round(orig.w + dx / ((R.CW + R.GAP) * z))));
+      const nh = Math.max(1, Math.min(4 - orig.y, Math.round(orig.h + dy / ((R.CH + R.GAP) * z))));
+      cand = { x: orig.x, y: orig.y, w: nw, h: nh };
+    }
+    const sizeChanged = cand.w !== p.w || cand.h !== p.h;
+    Object.assign(p, cand);
+    Object.assign(el.style, Object.fromEntries(Object.entries(pxRect(p)).map(([k, v]) => [k, v + 'px'])));
+    if (sizeChanged) renderTileInto(el, p, idx);   // 尺寸变了实时重绘内容
+    el.classList.toggle('bad', collides(pg(), idx, cand));
+  });
+  el.addEventListener('pointerup', () => {
+    if (!mode) return;
+    const p = pg().panels[idx];
+    el.classList.remove('drag');
+    if (collides(pg(), idx, p)) {
+      Object.assign(p, orig);
+      el.classList.remove('bad'); el.classList.add('shake');
+      setTimeout(() => renderStage(), 300);
+    } else if (moved) {
+      renderStage(); queueSave();
+    } else {
+      select(idx);   // 纯点击 -> 选中, 右侧检查器编辑
+    }
+    mode = null;
+  });
+  el.querySelector('.x').addEventListener('click', e => {
+    e.stopPropagation();
+    pg().panels.splice(idx, 1);
+    select(-1);
+    renderStage(); queueSave();
+  });
+}
+
+/* ---------- 选中 + 检查器 ---------- */
+function select(idx) {
+  selIdx = idx;
+  spEls.forEach((el, i) => el.classList.toggle('sel', i === idx));
+  renderInspector();
+  // 重新装饰字段(选中的可拖, 其他不可)。spEls 可能与新页 panels 数量不一致 -> 逐个判空
+  const pg = CFG.pages[curPage];
+  spEls.forEach((el, i) => { if (pg.panels[i]) renderTileInto(el, pg.panels[i], i); });
+}
+
+function renderInspector() {
+  const empty = selIdx < 0;
+  $('inspEmpty').style.display = empty ? 'block' : 'none';
+  $('inspBody').style.display = empty ? 'none' : 'block';
+  if (empty) return;
+  const p = CFG.pages[curPage].panels[selIdx];
+  const [ico, name] = W.TYPE_META[p.type] || ['❓', p.type];
+  $('inspTitle').textContent = `${ico} ${name} · ${p.w}×${p.h}`;
+  const pct = Math.round((p.scale || 1) * 100);
+  $('inspScale').value = pct; $('inspScaleVal').textContent = pct + '%';
+  const isText = p.type === 'text';
+  $('inspTextWrap').style.display = isText ? 'block' : 'none';
+  if (isText) { $('inspTitleInp').value = p.title || ''; $('inspContent').value = p.content || ''; }
+  // 字段滑块 + 对齐
+  const defs = W.FIELD_DEFS[p.type] || [];
+  $('inspFields').innerHTML = defs.map(([k, n, alignable]) => {
+    const c = W.fieldConf(p, k) || {};
+    const v = Math.round((c.s || 1) * 100);
+    const a = c.a || '';
+    return `<div class="fldGroup">
+      <div class="fldRow"><span>${n}</span><b data-fv="${k}">${v}%</b></div>
+      <input type="range" data-fk="${k}" min="60" max="220" step="5" value="${v}">
+      ${alignable ? `<div class="alignSeg" data-fa="${k}">
+        ${['left|居左', 'center|居中', 'right|居右'].map(x => { const [av, an] = x.split('|');
+          return `<button data-a="${av}" class="${a === av ? 'on' : ''}">${an}</button>`; }).join('')}
+      </div>` : ''}
+    </div>`;
+  }).join('');
+  // 绑定字段滑块(实时)
+  $('inspFields').querySelectorAll('input[data-fk]').forEach(inp => {
+    inp.oninput = () => {
+      const k = inp.dataset.fk, v = Math.round(+inp.value) / 100;
+      ensureField(p, k).s = v;
+      cleanField(p, k);
+      $('inspFields').querySelector(`[data-fv="${k}"]`).textContent = Math.round(v * 100) + '%';
+      liveApply();
+    };
+  });
+  // 对齐按钮
+  $('inspFields').querySelectorAll('.alignSeg').forEach(seg => {
+    seg.querySelectorAll('button').forEach(b => b.onclick = () => {
+      const k = seg.dataset.fa;
+      const cur = W.fieldConf(p, k) || {};
+      const next = cur.a === b.dataset.a ? '' : b.dataset.a;   // 再点一下取消
+      if (next) ensureField(p, k).a = next; else if (p.fields && p.fields[k]) delete p.fields[k].a;
+      cleanField(p, k);
+      seg.querySelectorAll('button').forEach(x => x.classList.toggle('on', x.dataset.a === next));
+      liveApply();
+    });
+  });
+}
+function ensureField(p, k) {
+  if (p.fs) {   // 迁移旧格式
+    p.fields = p.fields || {};
+    for (const [ok, ov] of Object.entries(p.fs)) p.fields[ok] = Object.assign({ s: ov }, p.fields[ok]);
+    delete p.fs;
+  }
+  p.fields = p.fields || {};
+  p.fields[k] = p.fields[k] || {};
+  return p.fields[k];
+}
+function cleanField(p, k) {   // 全默认值就删掉, 保持 config 干净
+  const c = p.fields && p.fields[k];
+  if (!c) return;
+  if ((c.s === 1 || c.s == null) && !c.a && !c.x && !c.y) delete p.fields[k];
+  if (p.fields && !Object.keys(p.fields).length) delete p.fields;
+}
+function liveApply() {
+  const p = CFG.pages[curPage].panels[selIdx];
+  renderTileInto(spEls[selIdx], p, selIdx);
+  queueSave();
+}
+$('inspScale').oninput = e => {
+  const p = CFG.pages[curPage].panels[selIdx];
+  p.scale = Math.round(+e.target.value) / 100;
+  $('inspScaleVal').textContent = e.target.value + '%';
+  liveApply();
+};
+$('inspTitleInp').oninput = e => { CFG.pages[curPage].panels[selIdx].title = e.target.value; liveApply(); };
+$('inspContent').oninput = e => { CFG.pages[curPage].panels[selIdx].content = e.target.value; liveApply(); };
+$('inspDel').onclick = () => {
+  CFG.pages[curPage].panels.splice(selIdx, 1);
+  select(-1); renderStage(); queueSave();
+};
+$('inspReset').onclick = () => {
+  const p = CFG.pages[curPage].panels[selIdx];
+  delete p.fields; delete p.fs; p.scale = 1;
+  renderInspector(); liveApply();
+};
+
+/* ---------- 字段直接拖动 ---------- */
+function decorateFields(sp, p, idx) {
+  const tile = sp.querySelector('.tile');
+  if (!tile) return;
+  const defs = W.FS_FIELDS[p.type] || {};
+  const z = zoomOf();
+  for (const [k, sel] of Object.entries(defs)) {
+    tile.querySelectorAll(sel).forEach(el => {
+      el.classList.add('fld-hot');
+      el.style.pointerEvents = 'auto';
+      el.onpointerdown = e => {
+        e.stopPropagation(); e.preventDefault();
+        const c = ensureField(p, k);
+        const scale = (p.scale || 1) * (c.s || 1);
+        const sx = e.clientX, sy = e.clientY, ox = c.x || 0, oy = c.y || 0;
+        el.setPointerCapture(e.pointerId);
+        const move = ev => {
+          c.x = Math.round(ox + (ev.clientX - sx) / (z * scale));
+          c.y = Math.round(oy + (ev.clientY - sy) / (z * scale));
+          tile.querySelectorAll(sel).forEach(t2 => { t2.style.transform = `translate(${c.x}px, ${c.y}px)`; });
+        };
+        const up = () => {
+          el.removeEventListener('pointermove', move);
+          el.removeEventListener('pointerup', up);
+          cleanField(p, k);
+          queueSave();
+        };
+        el.addEventListener('pointermove', move);
+        el.addEventListener('pointerup', up);
+      };
+    });
+  }
+}
+
+/* ---------- 添加面板 ---------- */
+function firstFree(w, h) {
+  const pg = CFG.pages[curPage];
+  for (let y = 0; y <= 4 - h; y++) for (let x = 0; x <= 4 - w; x++) {
+    if (!collides(pg, -1, { x, y, w, h })) return { x, y };
+  }
+  return null;
+}
+function addPanel(type) {
+  let [w, h] = DEFAULT_WH[type] || [2, 2];
+  let pos = firstFree(w, h);
+  if (!pos) { w = 1; h = 1; pos = firstFree(1, 1); }
+  if (!pos) { toast('这一页放满了 · 换页或先缩小面板'); return; }
+  CFG.pages[curPage].panels.push(Object.assign(
+    { id: 'n' + Date.now(), type, w, h, x: pos.x, y: pos.y },
+    type === 'text' ? { title: '备注', content: '点我在右侧编辑内容' } : {}));
+  renderStage(); queueSave();
+  select(CFG.pages[curPage].panels.length - 1);
+}
+
+/* ---------- tabs ---------- */
+function renderTabs() {
+  $('tabs').innerHTML = CFG.pages.map((p, i) =>
+    `<button class="tab ${i === curPage ? 'on' : ''}" data-i="${i}">${esc(p.name || '第' + (i + 1) + '页')}</button>`
+  ).join('') + '<button class="tab add" id="tabAdd">＋ 新页面</button>';
+  $('tabs').querySelectorAll('.tab[data-i]').forEach(b => b.onclick = () => { curPage = +b.dataset.i; select(-1); renderTabs(); renderStage(); });
+  $('tabAdd').onclick = () => {
+    CFG.pages.push({ name: '新页面', panels: [{ id: 'n' + Date.now(), type: 'clock', w: 2, h: 2, x: 1, y: 1 }] });
+    curPage = CFG.pages.length - 1;
+    select(-1); renderTabs(); renderStage(); queueSave();
+  };
+}
+$('btnCast').onclick = () => fetch('/api/page/set', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ i: curPage }) });
+$('btnRename').onclick = () => {
+  const n = prompt('页面名称', CFG.pages[curPage].name || '');
+  if (n != null && n.trim()) { CFG.pages[curPage].name = n.trim(); renderTabs(); queueSave(); }
+};
+$('btnDelPage').onclick = () => {
+  if (CFG.pages.length <= 1) { toast('至少保留一页'); return; }
+  if (!confirm('删除「' + (CFG.pages[curPage].name || '此页') + '」?')) return;
+  CFG.pages.splice(curPage, 1); curPage = 0;
+  select(-1); renderTabs(); renderStage(); queueSave();
+};
+
+/* ---------- 系统设置绑定 ---------- */
+function renderSettings() {
+  $('swatches').innerHTML = SWATCH.map(c =>
+    `<div class="sw ${CFG.theme.accent === c ? 'on' : ''}" style="background:${c}" data-c="${c}"></div>`
+  ).join('') + `<input type="color" id="customColor" value="${CFG.theme.accent || '#d97757'}" title="自定义颜色">`;
+  $('swatches').querySelectorAll('.sw').forEach(el => el.onclick = () => { CFG.theme.accent = el.dataset.c; renderSettings(); renderStage(); queueSave(); });
+  $('customColor').oninput = e => { CFG.theme.accent = e.target.value; renderStage(); queueSave(); };
+
+  $('keyCycles').checked = !!(CFG.rotation && CFG.rotation.keyCycles);
+  const cur = (CFG.rotation && CFG.rotation.intervalSec) || 0;
+  $('segInterval').innerHTML = INTERVALS.map(([v, n]) =>
+    `<button class="${v === cur ? 'on' : ''}" data-v="${v}">${n}</button>`).join('');
+  $('segInterval').querySelectorAll('button').forEach(b => b.onclick = () => {
+    CFG.rotation.intervalSec = +b.dataset.v; renderSettings(); queueSave();
+  });
+
+  CFG.hotkey = CFG.hotkey || { enabled: false, mods: 3, vk: 39, label: 'Ctrl + Alt + →' };
+  $('hkEnabled').checked = !!CFG.hotkey.enabled;
+  $('hkLabel').textContent = CFG.hotkey.label || '未设定';
+
+  CFG.usage = CFG.usage || { intervalMin: 1 };
+  CFG.clock = CFG.clock || { showSeconds: false };
+  CFG.pageToast = CFG.pageToast || { enabled: true };
+  CFG.lyrics = CFG.lyrics || { enabled: true, offsetSec: 0 };
+  CFG.net = CFG.net || { enabled: true, pingHost: '223.5.5.5' };
+  CFG.weather = CFG.weather || { enabled: true, city: '', lat: null, lon: null, label: '' };
+  CFG.calendar = CFG.calendar || { icsUrl: '' };
+  CFG.notify = CFG.notify || { enabled: false };
+
+  const curIv = CFG.usage.intervalMin || 1;
+  $('segUsage').innerHTML = USAGE_IV.map(([v, n]) =>
+    `<button class="${v === curIv ? 'on' : ''}" data-v="${v}">${n}</button>`).join('');
+  $('segUsage').querySelectorAll('button').forEach(b => b.onclick = () => {
+    CFG.usage.intervalMin = +b.dataset.v; renderSettings(); queueSave();
+  });
+  $('clkSec').checked = !!CFG.clock.showSeconds;
+  $('pgToast').checked = CFG.pageToast.enabled !== false;
+  $('lyEnabled').checked = !!CFG.lyrics.enabled;
+  $('nfEnabled').checked = !!CFG.notify.enabled;
+  $('wxCur').textContent = CFG.weather.label || CFG.weather.city || '未设置';
+  $('icsUrl').value = CFG.calendar.icsUrl || '';
+  $('pingHost').value = CFG.net.pingHost || '223.5.5.5';
+  $('lyOffVal').textContent = ((+CFG.lyrics.offsetSec || 0) > 0 ? '+' : '') + (+CFG.lyrics.offsetSec || 0).toFixed(1) + 's';
+}
+$('clkSec').onchange = e => { CFG.clock.showSeconds = e.target.checked; queueSave(); };
+$('pgToast').onchange = e => { CFG.pageToast.enabled = e.target.checked; queueSave(); };
+$('lyEnabled').onchange = e => { CFG.lyrics.enabled = e.target.checked; queueSave(); };
+$('nfEnabled').onchange = e => { CFG.notify.enabled = e.target.checked; queueSave(); };
+$('icsUrl').onchange = e => { CFG.calendar.icsUrl = e.target.value.trim(); queueSave(); };
+$('pingHost').onchange = e => { CFG.net.pingHost = e.target.value.trim() || '223.5.5.5'; queueSave(); };
+function nudgeLyOff(d) {
+  CFG.lyrics.offsetSec = Math.round(((+CFG.lyrics.offsetSec || 0) + d) * 10) / 10;
+  $('lyOffVal').textContent = (CFG.lyrics.offsetSec > 0 ? '+' : '') + CFG.lyrics.offsetSec.toFixed(1) + 's';
+  queueSave();
+}
+$('lyOffMinus').onclick = () => nudgeLyOff(-0.1);
+$('lyOffPlus').onclick = () => nudgeLyOff(0.1);
+
+// 天气城市搜索
+$('wxSearch').onclick = async () => {
+  const q = $('wxCity').value.trim();
+  if (!q) return;
+  $('wxResults').innerHTML = '<span class="sub">搜索中…</span>';
+  try {
+    const j = await (await fetch('/api/geo?q=' + encodeURIComponent(q))).json();
+    if (!j.results || !j.results.length) { $('wxResults').innerHTML = '<span class="sub">没找到, 换个写法试试</span>'; return; }
+    $('wxResults').innerHTML = j.results.map((r, i) =>
+      `<button data-i="${i}">📍 ${esc(r.name)}${r.admin1 ? ' · ' + esc(r.admin1) : ''}${r.country ? ' · ' + esc(r.country) : ''}</button>`).join('');
+    $('wxResults').querySelectorAll('button').forEach(b => b.onclick = () => {
+      const r = j.results[+b.dataset.i];
+      CFG.weather = { enabled: true, city: r.name, lat: r.lat, lon: r.lon, label: r.name + (r.admin1 ? ' · ' + r.admin1 : '') };
+      $('wxCur').textContent = CFG.weather.label;
+      $('wxResults').innerHTML = '<span class="sub" style="color:var(--green)">✓ 已设置, 天气马上更新</span>';
+      queueSave();
+    });
+  } catch { $('wxResults').innerHTML = '<span class="sub">搜索失败</span>'; }
+};
+$('wxCity').addEventListener('keydown', e => { if (e.key === 'Enter') $('wxSearch').click(); });
+
+$('hkEnabled').onchange = e => { CFG.hotkey.enabled = e.target.checked; queueSave(); };
+let capturing = false;
+$('hkCapture').onclick = () => { capturing = true; $('hkCapture').textContent = '按下组合键…'; };
+window.addEventListener('keydown', e => {
+  if (!capturing) return;
+  e.preventDefault();
+  const k = e.key;
+  if (k === 'Control' || k === 'Alt' || k === 'Shift' || k === 'Meta') return;
+  let mods = 0;
+  if (e.altKey) mods |= 1; if (e.ctrlKey) mods |= 2; if (e.shiftKey) mods |= 4; if (e.metaKey) mods |= 8;
+  const vk = e.keyCode;
+  const parts = [];
+  if (e.ctrlKey) parts.push('Ctrl'); if (e.altKey) parts.push('Alt'); if (e.shiftKey) parts.push('Shift'); if (e.metaKey) parts.push('Win');
+  const disp = { 37: '←', 38: '↑', 39: '→', 40: '↓', 32: 'Space' };
+  parts.push(disp[vk] || (k.length === 1 ? k.toUpperCase() : k));
+  CFG.hotkey.mods = mods; CFG.hotkey.vk = vk; CFG.hotkey.label = parts.join(' + ');
+  capturing = false;
+  $('hkCapture').textContent = '点击设定';
+  $('hkLabel').textContent = CFG.hotkey.label;
+  queueSave();
+});
+$('keyCycles').onchange = e => { CFG.rotation.keyCycles = e.target.checked; queueSave(); };
+$('autostart').onchange = async e => {
+  const r = await fetch('/api/system/autostart', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ on: e.target.checked }) });
+  if (!r.ok) { toast('设置失败'); e.target.checked = !e.target.checked; }
+};
+let brightTimer = null;
+$('bright').oninput = e => {
+  $('brightVal').textContent = e.target.value;
+  clearTimeout(brightTimer);
+  brightTimer = setTimeout(() => fetch('/api/system/brightness', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ value: +e.target.value }) }), 250);
+};
+
+async function loadSystem() {
+  const s = await (await fetch('/api/system')).json();
+  $('autostart').checked = !!s.autostart;
+  $('adminUrl').textContent = `http://${s.ip}:${s.port}/admin`;
+  $('ver').textContent = 'v' + s.version;
+  if (s.brightness != null) { $('bright').value = s.brightness; $('brightVal').textContent = s.brightness; }
+  const mk = ev => `  "${ev}": [{ ${ev === 'PreToolUse' || ev === 'PostToolUse' || ev === 'PermissionRequest' ? '"matcher": ".*", ' : ''}"hooks": [{ "type": "command", "async": true, "timeout": 10,
+    "command": "curl -s -m 5 -X POST 'http://100.86.98.114:${s.port}/api/activity-report?device=Mac' -H 'Content-Type: application/json' -d @-" }]}]`;
+  $('macSnippet').textContent = '"hooks": {\n' + ['UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PermissionRequest', 'Notification', 'Stop'].map(mk).join(',\n') + '\n}';
+}
+async function loadDevices() {
+  const d = await (await fetch('/api/devices')).json();
+  const stName = { permission: '等授权', tool: '干活中', thinking: '思考中', done: '刚完成', idle: '待机', sleeping: '睡眠', ended: '已结束' };
+  $('devices').innerHTML = d.devices.map(x => {
+    const cls = x.state === 'permission' ? 'perm' : (x.state === 'tool' || x.state === 'thinking') ? 'busy' : '';
+    const seen = x.lastSeen ? new Date(x.lastSeen).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) : '–';
+    return `<div class="dev"><span style="flex:1">${esc(x.name)}</span><span class="st ${cls}">${stName[x.state] || x.state}</span><span class="sub">${seen}</span></div>`;
+  }).join('');
+}
+
+/* ---------- 实时数据轮询: 舞台就是真实副屏画面 ---------- */
+async function pollPreview() {
+  try { LIVE.stats = await (await fetch('/api/stats')).json(); } catch {}
+  try { LIVE.claude = await (await fetch('/api/claude')).json(); } catch {}
+  try { LIVE.extras = await (await fetch('/api/extras')).json(); } catch {}
+  if (document.querySelector('[data-p="npLine"]')) {
+    try { LIVE.np = await (await fetch('/api/nowplaying')).json(); } catch {}
+  }
+  const st = $('stage');
+  refreshTileData(st);
+  // 通知监听状态提示
+  const nf = LIVE.extras && LIVE.extras.notify;
+  if (nf) {
+    const txt = {
+      allowed: '✓ 已授权, 正在监听(手机通知需开 Phone Link 同步)',
+      denied: '✕ 被拒: 到 设置 > 隐私和安全性 > 通知 里开启"允许应用访问通知", 再关开一次',
+      unsupported: '✕ 系统不支持',
+      missing: '✕ 缺 notify-listener.ps1',
+      off: '需 Phone Link 同步 + Windows 通知访问权限',
+    }[nf.status] || '需 Phone Link 同步 + Windows 通知访问权限';
+    $('nfStatus').textContent = txt;
+  }
+}
+
+(async () => {
+  const r = await (await fetch('/api/config')).json();
+  CFG = r.config;
+  CFG.theme = CFG.theme || {}; CFG.rotation = CFG.rotation || {};
+  $('devLine').textContent = ((CFG.device && CFG.device.name) || 'ProArt 副屏') + ' · 960×640';
+  $('palette').innerHTML = PALETTE_GROUPS.map(([cat, types]) =>
+    `<div class="palGroup"><div class="palCat">${cat}</div><div class="palRow">` +
+    types.map(t => { const [ico, name] = W.TYPE_META[t]; return `<button class="pal" data-t="${t}">${ico} ${name}</button>`; }).join('') +
+    `</div></div>`).join('');
+  $('palette').querySelectorAll('.pal').forEach(b => b.onclick = () => addPanel(b.dataset.t));
+  renderTabs(); renderSettings(); renderStage();
+  loadSystem(); loadDevices();
+  await pollPreview();
+  setInterval(loadDevices, 10000);
+  setInterval(pollPreview, 2000);
+  setInterval(() => W.updateClock($('stage'), CFG), 1000);
+  window.addEventListener('resize', () => { renderStage(); });
+})();
+</script>
+</body>
+</html>

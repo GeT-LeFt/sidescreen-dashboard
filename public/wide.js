@@ -1,0 +1,1088 @@
+/* 宽副屏 3840×1100 · 交互与数据(按 DESIGN-TOKENS.md 定稿参数实现) */
+'use strict';
+(() => {
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+const esc = s => String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+const post = (url, body) => fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) }).then(r => r.json()).catch(() => null);
+const get = url => fetch(url).then(r => r.json()).catch(() => null);
+const fmtT = s => { s = Math.max(0, Math.round(s || 0)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+const fmtBps = b => b > 1048576 ? (b / 1048576).toFixed(1) + ' MB/s' : Math.round(b / 1024) + ' KB/s';
+
+/* ---------- Toast ---------- */
+let toastT = null;
+function toast(msg) {
+  const el = $('#toast'); el.textContent = msg; el.classList.add('show');
+  clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove('show'), 2200);
+}
+
+/* ---------- 折线图(design: viewBox 0 0 100 30, 底部留 4) ---------- */
+function sparkPaths(vals, min, max) {
+  if (!vals || vals.length < 2) return null;
+  const lo = min != null ? min : Math.min(...vals);
+  const hi = max != null ? max : Math.max(...vals);
+  const span = (hi - lo) || 1;
+  const n = vals.length;
+  const pts = vals.map((v, i) => [(i / (n - 1)) * 100, 30 - ((v - lo) / span) * 26]);
+  const line = 'M' + pts.map(p => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' L');
+  return { line, area: line + ' L100,30 L0,30 Z' };
+}
+function drawSpark(svg, vals, opts) {
+  const p = sparkPaths(vals, opts && opts.min, opts && opts.max);
+  if (!p) { svg.innerHTML = ''; return; }
+  const aOp = (opts && opts.areaOp) || 0.10, lOp = (opts && opts.lineOp) || 0.55, w = (opts && opts.w) || 1.4;
+  svg.innerHTML = `<path d="${p.area}" fill="var(--accent)" opacity="${aOp}"></path>` +
+    `<path d="${p.line}" fill="none" stroke="var(--accent)" stroke-width="${w}" opacity="${lOp}" vector-effect="non-scaling-stroke"></path>`;
+}
+
+/* ---------- 页面切换(轨道 translateY + 边缘手势) ---------- */
+const PAGE_NAMES = ['CLAUDE 会话', '仪表盘', '操控台', '媒体'];
+const track = $('#track');
+const QP = new URLSearchParams(location.search);
+/* 换了页序(Claude 插到 0), 换存储键避免读到旧编号; 默认停在仪表盘(1) */
+let page = QP.get('page') != null ? Number(QP.get('page')) : Number(localStorage.getItem('wide-page4') || 1);
+let dragY = 0, dragging = false;
+function applyPage() { track.style.transform = `translateY(${-(page * 1100) + dragY}px)`; }
+function gotoPage(p, silent) {
+  page = Math.max(0, Math.min(3, p)); dragY = 0;
+  track.classList.remove('dragging'); applyPage();
+  localStorage.setItem('wide-page4', page);
+  if (!silent) {
+    const pt = $('#pageToast'); pt.textContent = PAGE_NAMES[page]; pt.classList.add('show');
+    clearTimeout(gotoPage._t); gotoPage._t = setTimeout(() => pt.classList.remove('show'), 1400);
+  }
+}
+$$('.edge').forEach(edge => {
+  let startY = null, pid = null;
+  edge.addEventListener('pointerdown', e => {
+    if (gameOn) return;   // 副驾驶页禁用切页手势
+    startY = e.clientY; pid = e.pointerId; dragging = true;
+    edge.classList.add('active'); track.classList.add('dragging');
+    edge.setPointerCapture(pid);
+  });
+  edge.addEventListener('pointermove', e => {
+    if (startY == null) return;
+    const scale = window.innerHeight / 1100;
+    let dy = (e.clientY - startY) / (scale || 1);
+    if ((page === 0 && dy > 0) || (page === 3 && dy < 0)) dy *= 0.25;   // 橡皮筋
+    dragY = dy; applyPage();
+  });
+  const end = e => {
+    if (startY == null) return;
+    const dy = dragY; startY = null; edge.classList.remove('active');
+    setTimeout(() => dragging = false, 50);   // 复位! 否则滑一次页后磁贴点击永远被吞
+    if (dy < -180 && page < 3) gotoPage(page + 1);
+    else if (dy > 180 && page > 0) gotoPage(page - 1);
+    else gotoPage(page, true);
+  };
+  edge.addEventListener('pointerup', end);
+  edge.addEventListener('pointercancel', end);
+});
+/* 键盘切页: PageUp 上一页 / PageDown 下一页(副驾驶页与弹层开启时不响应) */
+window.addEventListener('keydown', e => {
+  if (e.key !== 'PageUp' && e.key !== 'PageDown') return;
+  if (gameOn || ovlMask.classList.contains('show')) return;
+  e.preventDefault();
+  if (e.key === 'PageUp' && page > 0) gotoPage(page - 1);
+  else if (e.key === 'PageDown' && page < 3) gotoPage(page + 1);
+});
+if (!localStorage.getItem('omdash-edgehint')) {   // 首次提示 2.6s
+  document.body.classList.add('edgehint');
+  setTimeout(() => { document.body.classList.remove('edgehint'); localStorage.setItem('omdash-edgehint', '1'); }, 2600);
+}
+gotoPage(page, true);
+
+/* ---------- 水平/垂直拖动 helper(design: hDrag/vDrag) ---------- */
+/* 交互锁: 手指按着滑块/推子期间禁止重绘 DOM(否则 2s 轮询会把正在拖的元素换掉) */
+let uiBusy = false, uiBusyT = null;
+function lockUI() { uiBusy = true; clearTimeout(uiBusyT); }
+function unlockUI() { clearTimeout(uiBusyT); uiBusyT = setTimeout(() => uiBusy = false, 600); }
+function hDrag(rail, cb) {
+  const set = e => { const r = rail.getBoundingClientRect(); cb(Math.max(0, Math.min(1, (e.clientX - r.left) / r.width))); };
+  rail.addEventListener('pointerdown', e => {
+    e.stopPropagation(); lockUI(); set(e);
+    const mv = ev => set(ev);
+    const up = () => { unlockUI(); window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); };
+    window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
+  });
+}
+function vDrag(fader, cb) {
+  const set = e => { const r = fader.getBoundingClientRect(); cb(Math.max(0, Math.min(1, 1 - (e.clientY - r.top) / r.height))); };
+  fader.addEventListener('pointerdown', e => {
+    e.stopPropagation(); lockUI(); set(e);
+    const mv = ev => set(ev);
+    const up = () => { unlockUI(); window.removeEventListener('pointermove', mv); window.removeEventListener('pointerup', up); };
+    window.addEventListener('pointermove', mv); window.addEventListener('pointerup', up);
+  });
+}
+function setRail(rail, pct) {
+  const i = rail.querySelector('i'), k = rail.querySelector('.knob');
+  if (i) i.style.width = pct + '%';
+  if (k) k.style.left = pct + '%';
+}
+
+/* ---------- 长按(危险 1.5s 线性条 / 应用 0.6s 无进度) ---------- */
+function bindHold(el, ms, onFire, onTap) {
+  let t0 = 0, raf = 0, fired = false;
+  const bar = el.querySelector('.holdbar');
+  const tick = () => {
+    const pct = Math.min(1, (performance.now() - t0) / ms);
+    if (bar) bar.querySelector('i').style.width = (pct * 100) + '%';
+    if (pct >= 1) { fired = true; end(); onFire(); return; }
+    raf = requestAnimationFrame(tick);
+  };
+  const start = e => { fired = false; t0 = performance.now(); if (bar) bar.classList.add('active'); raf = requestAnimationFrame(tick); };
+  const end = () => { cancelAnimationFrame(raf); if (bar) { bar.classList.remove('active'); bar.querySelector('i').style.width = '0%'; } };
+  el.addEventListener('pointerdown', start);
+  el.addEventListener('pointerup', () => { const was = fired; end(); if (!was && onTap && performance.now() - t0 < ms) onTap(); });
+  el.addEventListener('pointerleave', end);
+}
+
+/* ---------- 弹层母版 ---------- */
+const ovlMask = $('#ovlMask');
+let ovlKind = null, dtlTimer = null;
+function openOvl(kind, title, sub, bodyHtml) {
+  ovlKind = kind;
+  $('#ovlTitle').textContent = title; $('#ovlSub').textContent = sub || '';
+  $('#ovlBody').innerHTML = bodyHtml;
+  ovlMask.classList.add('show');
+}
+function closeOvl() { ovlMask.classList.remove('show'); ovlKind = null; clearInterval(dtlTimer); dtlTimer = null; }
+ovlMask.addEventListener('pointerdown', e => { if (e.target === ovlMask) closeOvl(); });
+$('#ovlClose').addEventListener('pointerup', closeOvl);
+$('#ovl').addEventListener('pointerdown', e => e.stopPropagation());
+
+/* ==================== 看板页 ==================== */
+
+/* 性能磁贴(3×2 定稿: GPU/CPU/内存/显存/GPU功耗/网络延迟) */
+const TILES = [
+  { key: 'gpu',   title: 'GPU',  metric: 'gpuUtil',  detail: 'GPU' },
+  { key: 'cpu',   title: 'CPU',  metric: 'cpuUtil',  detail: 'CPU' },
+  { key: 'ram',   title: '内存',  metric: 'ram',      detail: '内存' },
+  { key: 'vram',  title: '显存',  metric: 'vram',     detail: '显存' },
+  { key: 'power', title: 'GPU 功耗', metric: 'gpuPower', detail: 'GPU 功耗' },
+  { key: 'net',   title: '网络延迟', metric: 'ping',  detail: '网络' },
+];
+$('#perfGrid').innerHTML = TILES.map(t => `
+  <div class="card ptile press-tile" data-tile="${t.key}">
+    <div class="tt"><span class="name">${t.title}</span><span class="model" data-f="model"></span></div>
+    <div class="mid">
+      <div class="big"><span data-f="big">--</span><span class="unit" data-f="unit"></span></div>
+      <div class="sub"><span class="v" data-f="subv">--</span><span class="l" data-f="subl"></span></div>
+    </div>
+    <svg class="spark" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
+  </div>`).join('');
+
+let stats = null, hist = {};
+function tileSet(key, f, v) { const el = document.querySelector(`[data-tile="${key}"] [data-f="${f}"]`); if (el) el.textContent = v; }
+function renderTiles() {
+  if (!stats) return;
+  const g = stats.gpu || {}, c = stats.cpu || {}, r = stats.ram || {}, io = stats.io || {};
+  tileSet('gpu', 'model', g.short || ''); tileSet('gpu', 'big', g.util != null ? g.util : '--'); tileSet('gpu', 'unit', '%');
+  tileSet('gpu', 'subv', (g.temp || 0) + '°C'); tileSet('gpu', 'subl', '核心温度');
+  tileSet('cpu', 'model', c.short || ''); tileSet('cpu', 'big', c.util != null ? c.util : '--'); tileSet('cpu', 'unit', '%');
+  tileSet('cpu', 'subv', ((c.clock || 0) / 1000).toFixed(1) + 'GHz'); tileSet('cpu', 'subl', '当前频率');
+  tileSet('ram', 'big', (r.usedGB || 0).toFixed(1)); tileSet('ram', 'unit', 'GB');
+  tileSet('ram', 'subv', Math.round((r.usedGB / (r.totalGB || 1)) * 100) + '%'); tileSet('ram', 'subl', '占用率');
+  tileSet('vram', 'big', ((g.vramUsed || 0) / 1024).toFixed(1)); tileSet('vram', 'unit', 'GB');
+  tileSet('vram', 'subv', Math.round(((g.vramUsed || 0) / (g.vramTotal || 1)) * 100) + '%'); tileSet('vram', 'subl', '占用率');
+  tileSet('power', 'big', Math.round(g.power || 0)); tileSet('power', 'unit', 'W');
+  tileSet('power', 'subv', Math.round(g.fan || 0) + '%'); tileSet('power', 'subl', 'GPU 风扇');
+  const ping = (extras && extras.net && extras.net.ping);
+  tileSet('net', 'big', ping != null ? ping : '--'); tileSet('net', 'unit', 'ms');
+  tileSet('net', 'subv', extras && extras.net ? fmtBps(extras.net.rx || 0) : '--'); tileSet('net', 'subl', '下行');
+  /* 操控台迷你性能卡 */
+  const cg = $('#cGpu'); if (cg) cg.textContent = `${g.util != null ? g.util : '--'}% · ${g.temp || '--'}°C`;
+  const cc = $('#cCpu'); if (cc) cc.textContent = `${c.util != null ? c.util : '--'}% · ${((c.clock || 0) / 1000).toFixed(1)}GHz`;
+  const cr = $('#cRam'); if (cr) cr.textContent = `${(r.usedGB || 0).toFixed(1)} GB`;
+}
+function renderTileSparks() {
+  for (const t of TILES) {
+    const svg = document.querySelector(`[data-tile="${t.key}"] svg.spark`);
+    if (svg && hist[t.metric]) drawSpark(svg, hist[t.metric]);
+  }
+}
+
+/* 磁贴详情弹层 */
+const DETAIL_META = {
+  gpu:  { metric: 'gpuUtil', unit: '%', label: '利用率', kv: s => [['利用率', s.gpu.util + '%'], ['核心温度', s.gpu.temp + '°C'], ['功耗', Math.round(s.gpu.power) + 'W'], ['风扇', s.gpu.fan + '%'], ['显存', (s.gpu.vramUsed / 1024).toFixed(1) + '/' + Math.round(s.gpu.vramTotal / 1024) + 'GB'], ['核心频率', (s.gpu.clock / 1000).toFixed(2) + 'GHz']] },
+  cpu:  { metric: 'cpuUtil', unit: '%', label: '利用率', kv: s => [['利用率', s.cpu.util + '%'], ['频率', (s.cpu.clock / 1000).toFixed(1) + 'GHz'], ['进程数', s.sys ? s.sys.procs : '--'], ['内存', s.ram.usedGB.toFixed(1) + 'GB'], ['磁盘读', fmtBps(s.io.read || 0)], ['磁盘写', fmtBps(s.io.write || 0)]] },
+  ram:  { metric: 'ram', unit: 'GB', label: '内存占用', kv: s => [['已用', s.ram.usedGB.toFixed(1) + 'GB'], ['总量', Math.round(s.ram.totalGB) + 'GB'], ['占用率', Math.round(s.ram.usedGB / s.ram.totalGB * 100) + '%'], ['进程数', s.sys ? s.sys.procs : '--'], ['磁盘读', fmtBps(s.io.read || 0)], ['磁盘写', fmtBps(s.io.write || 0)]] },
+  vram: { metric: 'vram', unit: 'GB', label: '显存占用', kv: s => [['已用', (s.gpu.vramUsed / 1024).toFixed(1) + 'GB'], ['总量', Math.round(s.gpu.vramTotal / 1024) + 'GB'], ['占用率', Math.round(s.gpu.vramUsed / (s.gpu.vramTotal || 1) * 100) + '%'], ['GPU 利用率', s.gpu.util + '%'], ['核心频率', (s.gpu.clock / 1000).toFixed(2) + 'GHz'], ['温度', s.gpu.temp + '°C']] },
+  power:{ metric: 'gpuPower', unit: 'W', label: 'GPU 功耗', kv: s => [['功耗', Math.round(s.gpu.power) + 'W'], ['风扇', s.gpu.fan + '%'], ['温度', s.gpu.temp + '°C'], ['利用率', s.gpu.util + '%'], ['核心频率', (s.gpu.clock / 1000).toFixed(2) + 'GHz'], ['显存', (s.gpu.vramUsed / 1024).toFixed(1) + 'GB']] },
+  net:  { metric: 'ping', unit: 'ms', label: '网络延迟', kv: () => [['延迟', (extras.net.ping != null ? extras.net.ping : '--') + 'ms'], ['下行', fmtBps(extras.net.rx || 0)], ['上行', fmtBps(extras.net.tx || 0)], ['状态', extras.net.ok ? '正常' : '异常'], ['丢包率', '—'], ['Ping 主机', '223.5.5.5']] },
+};
+let dtlTier = 1;
+async function renderDetail(key) {
+  const meta = DETAIL_META[key];
+  const r = await get(`/api/history?metric=${meta.metric}&tier=${dtlTier}`);
+  const svg = $('#dtlChart'); if (!svg) return;
+  drawSpark(svg, (r && r.points) || [], { areaOp: 0.12, lineOp: 1, w: 1.2, min: 0 });
+  const nowEl = $('#dtlNow');
+  const last = r && r.points && r.points.length ? r.points[r.points.length - 1] : '--';
+  if (nowEl) nowEl.innerHTML = `${esc(last)}<span class="u">${meta.unit}</span>`;
+  if (stats) $('#dtlSide').innerHTML = meta.kv(stats).map(kv => `<div class="dtl-kv"><div class="k">${esc(kv[0])}</div><div class="v">${esc(kv[1])}</div></div>`).join('');
+}
+function openDetail(key) {
+  const meta = DETAIL_META[key], t = TILES.find(x => x.key === key);
+  dtlTier = 1;
+  openOvl('detail', t.detail + (key === 'gpu' && stats ? ' · ' + (stats.gpu.short || '') : ''), '从看板磁贴打开', `
+    <div id="dtl">
+      <div id="dtlLeft">
+        <svg id="dtlChart" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
+        <div id="dtlNow">--</div>
+        <div id="dtlRanges">
+          <div class="range-btn press-sm" data-tier="0">10 分钟</div>
+          <div class="range-btn on press-sm" data-tier="1">1 小时</div>
+          <div class="range-btn press-sm" data-tier="2">6 小时</div>
+        </div>
+      </div>
+      <div id="dtlSide"></div>
+    </div>`);
+  $$('#dtlRanges .range-btn').forEach(b => b.addEventListener('pointerup', () => {
+    dtlTier = Number(b.dataset.tier);
+    $$('#dtlRanges .range-btn').forEach(x => x.classList.toggle('on', x === b));
+    renderDetail(key);
+  }));
+  renderDetail(key);
+  dtlTimer = setInterval(() => renderDetail(key), 5000);
+}
+$('#perfGrid').addEventListener('pointerup', e => {
+  const tile = e.target.closest('.ptile');
+  if (tile && !dragging) openDetail(tile.dataset.tile);
+});
+
+/* 时钟 + 农历 + 吉祥物 */
+function renderClock() {
+  const d = new Date();
+  const hh = String(d.getHours()).padStart(2, '0'), mm = String(d.getMinutes()).padStart(2, '0'), ss = String(d.getSeconds()).padStart(2, '0');
+  $('#clockTime').innerHTML = `${hh}:${mm}<span class="sec">${ss}</span>`;
+  let lunar = '';
+  try { const l = Lunar.date(d); lunar = ` · 农历${l.isLeap ? '闰' : ''}${l.monthCn}${l.dayCn}`; } catch {}
+  $('#clockDate').innerHTML = `<b>${Lunar.weekCn ? Lunar.weekCn(d) : ''}</b> · ${d.getMonth() + 1}月${d.getDate()}日${lunar}`;
+  $('#cTime').textContent = `${hh}:${mm}`;
+  $('#cDate').textContent = `${d.getMonth() + 1}月${d.getDate()}日 ${Lunar.weekCn ? Lunar.weekCn(d) : ''}`;
+  const g = $('#gClock'); if (g) g.textContent = `${hh}:${mm}`;
+}
+setInterval(renderClock, 1000); renderClock();
+/* 像素吉祥物(16×16, --accent 着色) */
+(() => {
+  const P = ['0000011111100000','0000111111110000','0001111111111000','0011011111101100','0011011111101100','0111111111111110','0111111111111110','0111101111011110','0111111111111110','0011111111111100','0011101111011100','0001111111111000','0000110110110000','0001100110011000','0011000110001100','0000000000000000'];
+  let svg = '';
+  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) if (P[y][x] === '1') svg += `<rect x="${x}" y="${y}" width="1" height="1" fill="var(--accent)"/>`;
+  $('#mascot').innerHTML = svg;
+})();
+
+/* Claude 用量 */
+async function pollClaude() {
+  const c = await get('/api/claude'); if (!c) return;
+  const u = c.usage || {};
+  const CIRC = 2 * Math.PI * 43;
+  const sp = u.session ? Math.round(u.session.pct) : null;
+  $('#usageSessPct').textContent = sp != null ? sp + '%' : '--';
+  $('#usageRing').setAttribute('stroke-dasharray', `${((sp || 0) / 100) * CIRC} ${CIRC}`);
+  const wp = u.weekAll ? Math.round(u.weekAll.pct) : null;
+  $('#usageWeekPct').textContent = wp != null ? wp + '%' : '--';
+  $('#usageWeekBar').style.width = (wp || 0) + '%';
+  const sc = u.weekScoped;
+  $('#usageScopedLabel').textContent = (sc && sc.label ? sc.label : 'Opus') + ' 额度';
+  $('#usageScopedPct').textContent = sc ? Math.round(sc.pct) + '%' : '--';
+  $('#usageScopedBar').style.width = (sc ? sc.pct : 0) + '%';
+  let meta = c.error ? ('⚠ ' + c.error) : '';
+  if (!meta && u.session && u.session.resetsAt) {
+    const left = u.session.resetsAt - Date.now();
+    meta = `会话重置 ${Math.floor(left / 3600000)}小时${Math.round(left % 3600000 / 60000)}分 后`;
+  }
+  $('#usageMeta').textContent = meta || '—';
+  /* ⓪ 页迷你额度窗联动(同一份数据) */
+  $('#csSessPct').textContent = sp != null ? sp + '%' : '--';
+  $('#csSessBar').style.width = (sp || 0) + '%';
+  $('#csWeekPct').textContent = wp != null ? wp + '%' : '--';
+  $('#csWeekBar').style.width = (wp || 0) + '%';
+  $('#csScLabel').textContent = (sc && sc.label ? sc.label : 'Opus');
+  $('#csScPct').textContent = sc ? Math.round(sc.pct) + '%' : '--';
+  $('#csScBar').style.width = (sc ? sc.pct : 0) + '%';
+  $('#csUsageMeta').textContent = meta || '—';
+  const tok = $('#usageTok');
+  if (c.tokenExpiresAt) {
+    const min = Math.round((c.tokenExpiresAt - Date.now()) / 60000);
+    tok.classList.toggle('crit', min <= 0); tok.classList.toggle('warn', min > 0 && min < 30);
+    tok.textContent = min <= 0 ? '⬤ OAuth 令牌已过期' : (min < 60 ? `⬤ OAuth 令牌 ${min} 分钟后过期` : `⬤ OAuth 令牌 ${Math.floor(min / 60)} 小时后过期`);
+  } else tok.textContent = '';
+}
+setInterval(pollClaude, 30 * 1000); pollClaude();
+
+/* ---------- 额度详情弹层(点会话额度卡打开): 全部限额 + 历史走势 ---------- */
+const USG_SERIES = [
+  { k: 's', label: '会话', color: 'var(--accent)', hex: '#F59E0B' },
+  { k: 'w', label: '周额度', color: '#5B9CF5', hex: '#5B9CF5' },
+  { k: 'o', label: 'Opus', color: '#B48CF2', hex: '#B48CF2' },
+];
+let usgHours = 24;
+const USG_RANGES = [[12, '12 小时'], [24, '24 小时'], [24 * 7, '7 天'], [24 * 30, '30 天']];
+function fmtAbs(ts) {
+  const d = new Date(ts);
+  return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+function fmtLeft(ms) {
+  if (ms <= 0) return '已过';
+  const h = Math.floor(ms / 3600000), m = Math.round(ms % 3600000 / 60000);
+  if (h >= 48) return Math.floor(h / 24) + ' 天 ' + (h % 24) + ' 小时后';
+  return (h ? h + ' 小时 ' : '') + m + ' 分钟后';
+}
+function fmtAgo(ms) {
+  const m = Math.round(ms / 60000);
+  return m < 1 ? '刚刚' : m < 60 ? m + ' 分钟前' : Math.floor(m / 60) + ' 小时 ' + (m % 60) + ' 分前';
+}
+function usgKindLabel(l) {
+  if (l.kind === 'session') return '会话额度 · 5 小时滚动';
+  if (l.kind === 'weekly_all') return '周额度 · 全部模型';
+  if (l.kind === 'weekly_scoped') return ((l.scope && l.scope.model && l.scope.model.display_name) || 'Opus') + ' · 周额度';
+  return l.kind || '未知限额';
+}
+function drawUsageChart(d) {
+  const svg = $('#usgChart'), xl = $('#usgXlab'); if (!svg) return;
+  const hist = d.history || [];
+  const now = Date.now(), t0 = now - usgHours * 3600 * 1000, span = now - t0;
+  const X = t => ((t - t0) / span) * 1000;
+  const Y = v => 290 - (v / 100) * 270;   // viewBox 1000x300, 上下留 10/20
+  const gapMs = Math.max(span / 40, 20 * 60 * 1000);   // 数据断档(服务停跑)不连线
+  let out = [25, 50, 75, 100].map(v =>
+    `<line x1="0" x2="1000" y1="${Y(v)}" y2="${Y(v)}" stroke="#1a212c" stroke-width="1" vector-effect="non-scaling-stroke"/>`).join('');
+  for (const s of USG_SERIES) {
+    let dstr = '', prev = 0;
+    for (const p of hist) {
+      if (p[s.k] == null) { prev = 0; continue; }
+      dstr += `${!prev || p.t - prev > gapMs ? 'M' : 'L'}${X(p.t).toFixed(1)},${Y(p[s.k]).toFixed(1)}`;
+      prev = p.t;
+    }
+    if (dstr) out += `<path d="${dstr}" fill="none" stroke="${s.hex}" stroke-width="2.6" vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"/>`;
+  }
+  svg.innerHTML = out;
+  /* 时间刻度(HTML 层, 不随 SVG 拉伸变形) */
+  if (xl) {
+    const n = 6, ticks = [];
+    for (let i = 0; i <= n; i++) {
+      const t = t0 + span * (i / n), dt = new Date(t);
+      const lb = usgHours <= 48 ? String(dt.getHours()).padStart(2, '0') + ':00' : (dt.getMonth() + 1) + '/' + dt.getDate();
+      const tf = i === 0 ? 'translateX(0)' : i === n ? 'translateX(-100%)' : 'translateX(-50%)';   // 两端不出界
+      ticks.push(`<span style="left:${(i / n * 100).toFixed(1)}%;transform:${tf}">${lb}</span>`);
+    }
+    xl.innerHTML = ticks.join('');
+  }
+  const hint = $('#usgEmpty');
+  if (hint) hint.style.display = hist.length > 1 ? 'none' : '';
+}
+async function renderUsageOvl() {
+  const d = await get('/api/usage/detail?hours=' + usgHours);
+  if (!d || ovlKind !== 'usage') return;
+  drawUsageChart(d);
+  /* 图例第三项跟随实际限定模型名(Opus/Fable…) */
+  const scLb = d.usage && d.usage.weekScoped && d.usage.weekScoped.label;
+  const lg = $$('#usgLegend span');
+  if (scLb && lg.length === 3) lg[2].innerHTML = `<i style="background:#B48CF2"></i>${esc(scLb)}`;
+  /* 各限额卡: 用接口原样的 limits 列表, 有几条画几条 */
+  const sevCls = s => s === 'critical' || s === 'exceeded' ? 'crit' : (s === 'warning' || s === 'high' ? 'warn' : '');
+  const lims = (d.limits && d.limits.length) ? d.limits : null;
+  const rows = lims ? lims.map(l => {
+    const pct = Math.round(l.percent || 0);
+    const rst = l.resets_at ? Date.parse(l.resets_at) : null;
+    const color = l.kind === 'weekly_all' ? '#5B9CF5' : l.kind === 'weekly_scoped' ? '#B48CF2' : 'var(--accent)';
+    return `<div class="usg-limit">
+      <div class="row"><span class="nm">${esc(usgKindLabel(l))}</span><b class="pv ${sevCls(l.severity)}">${pct}%</b></div>
+      <div class="hbar"><i style="width:${Math.min(100, pct)}%;background:${color}"></i></div>
+      <div class="rs">${rst ? '重置 ' + fmtLeft(rst - Date.now()) + ' · ' + fmtAbs(rst) : '—'}</div>
+    </div>`;
+  }).join('') : '<div class="empty">尚未拉到额度数据</div>';
+  const metas = [];
+  metas.push(['上次更新', d.fetchedAt ? fmtAgo(Date.now() - d.fetchedAt) : '—']);
+  metas.push(['采样间隔', d.intervalMin + ' 分钟']);
+  metas.push(['历史样本', (d.historyTotal || 0) + ' 点 · 保留 30 天']);
+  if (d.tokenExpiresAt) {
+    const min = Math.round((d.tokenExpiresAt - Date.now()) / 60000);
+    metas.push(['OAuth 令牌', min <= 0 ? '已过期' : fmtLeft(d.tokenExpiresAt - Date.now()).replace('后', '') + '后到期']);
+  }
+  if (d.error) metas.push(['状态', '⚠ ' + d.error]);
+  $('#usgSide').innerHTML = rows +
+    `<div class="usg-meta">${metas.map(m => `<div class="mrow"><span>${esc(m[0])}</span><b>${esc(m[1])}</b></div>`).join('')}</div>`;
+}
+function openUsageOvl() {
+  openOvl('usage', 'CLAUDE CODE 用量', '官方 oauth/usage · 走势为本机每分钟采样', `
+    <div id="usgOvl">
+      <div id="usgLeft">
+        <svg id="usgChart" viewBox="0 0 1000 300" preserveAspectRatio="none"></svg>
+        <div id="usgYlab"><span style="top:6.7%">100</span><span style="top:29.2%">75</span><span style="top:51.7%">50</span><span style="top:74.2%">25</span></div>
+        <div id="usgXlab"></div>
+        <div id="usgLegend">${USG_SERIES.map(s => `<span><i style="background:${s.hex}"></i>${s.label}</span>`).join('')}</div>
+        <div id="usgEmpty">历史采样中 · 额度每次刷新自动记一个点</div>
+        <div id="usgRanges">${USG_RANGES.map(([h, n]) =>
+          `<div class="range-btn press-sm ${h === usgHours ? 'on' : ''}" data-h="${h}">${n}</div>`).join('')}</div>
+      </div>
+      <div id="usgSide"><div class="empty">读取中…</div></div>
+    </div>`);
+  $$('#usgRanges .range-btn').forEach(b => b.addEventListener('pointerup', () => {
+    usgHours = Number(b.dataset.h);
+    $$('#usgRanges .range-btn').forEach(x => x.classList.toggle('on', x === b));
+    renderUsageOvl();
+  }));
+  renderUsageOvl();
+  dtlTimer = setInterval(renderUsageOvl, 30 * 1000);
+}
+$('#usageCard').addEventListener('pointerup', () => { if (!dragging) openUsageOvl(); });
+
+/* ==================== ⓪ Claude 会话页 ==================== */
+const CS_KIND = { approve: '等你批授权', choose: '等你选选项', reply: '等你回复' };
+const CS_CHIP = { running: '运行中', waiting: '等你操作', done: '已完成' };
+function csAge(ms) { const m = Math.round(ms / 60000); return m < 1 ? '刚刚' : m + ' 分钟前'; }
+/* 已读表: sid -> 知悉时刻的事件 ts。会话再动 ts 就变新 -> 自动重新算"未读" */
+let csRead = {};
+try { csRead = JSON.parse(localStorage.getItem('cs-read') || '{}'); } catch {}
+function csMarkRead(sid, ts) {
+  csRead[sid] = ts;
+  const cut = Date.now() - 24 * 3600 * 1000;   // 顺手清一天前的旧记录
+  for (const k of Object.keys(csRead)) if (csRead[k] < cut) delete csRead[k];
+  localStorage.setItem('cs-read', JSON.stringify(csRead));
+  csSig = ''; pollSessions();
+}
+let csSig = '', csLast = null;
+async function pollSessions() {
+  const r = await get('/api/claude/sessions'); if (!r) return;
+  csLast = r;
+  const c = r.counts || {};
+  /* 已完成且点过"知悉"的隐藏; 会话若有新动静(ts 更新)会自动重新出现 */
+  const list = (r.sessions || []).filter(s => !(s.status === 'done' && csRead[s.sid] >= s.ts));
+  const hidden = (r.sessions || []).length - list.length;
+  $('#csTotal').textContent = Math.max(0, (c.total || 0) - hidden);
+  $('#csRunning').textContent = c.running || 0;
+  $('#csWaiting').textContent = c.waiting || 0;
+  $('#csWaitWrap').classList.toggle('warn', (c.waiting || 0) > 0);
+  const name = s => s.title || s.proj;
+  /* msg 行: 有等待的就"叫", 否则安静地报最新会话 */
+  const w = list.find(s => s.status === 'waiting');
+  const msgEl = $('#csMsg');
+  if (w) {
+    msgEl.textContent = `⚠ ${name(w)} · ${CS_KIND[w.kind] || '等你操作'}${w.tool ? ' · ' + w.tool : ''}`;
+    msgEl.classList.add('warn');
+  } else {
+    const top = list[0];
+    msgEl.textContent = top ? `${name(top)} · ${top.detail || CS_CHIP[top.status]}` : '暂无活跃会话';
+    msgEl.classList.remove('warn');
+  }
+  /* 分两列: 左=运行中(含等你操作), 右=已完成; 各按时间倒序(最新在上) */
+  const byTs = (a, b) => b.ts - a.ts;
+  const running = list.filter(s => s.status !== 'done').sort(byTs);
+  const done = list.filter(s => s.status === 'done').sort(byTs);
+  $('#csRunN').textContent = running.length;
+  $('#csDoneN').textContent = done.length;
+  /* 内容签名没变就不动 DOM(分钟数进签名, 年龄跳分钟时刷新) */
+  const sig = JSON.stringify(list.map(s => [s.sid, s.status, s.ts, s.title, s.detail, (s.reply || '').slice(0, 60), Math.floor((r.t - s.ts) / 60000)]));
+  if (sig === csSig) return;
+  csSig = sig;
+  const card = s => {
+    const act = s.status === 'waiting'
+      ? `<div class="act warn">⚠ ${esc(CS_KIND[s.kind] || '等你操作')}${s.tool ? ' · approve: ' + esc(s.tool) : ''}</div>`
+      : `<div class="act">${s.detail ? esc(s.detail) : (s.status === 'running' ? '思考中…' : '')}</div>`;
+    return `<div class="cs-card ${s.status}" ${s.status === 'done' ? `data-ack="${esc(s.sid)}" data-ts="${s.ts}"` : ''}>
+      <div class="head"><span class="proj">${esc(name(s))}</span><span class="sid">#${esc(s.sid)}</span>
+        <span class="cs-chip ${s.status}">${CS_CHIP[s.status]}</span><span class="age">${csAge(r.t - s.ts)}</span></div>
+      ${act}
+      <div class="reply">${s.reply ? '<b>最后回复:</b>' + esc(s.reply) : '<b>暂无回复文本</b>'}</div>
+      ${s.status === 'done' ? '<div class="ack">✓ 已完成 · 点一下标记已读</div>' : ''}
+    </div>`;
+  };
+  $('#csRunBody').innerHTML = running.map(card).join('') || '<div class="empty">无运行中会话</div>';
+  $('#csDoneBody').innerHTML = done.map(card).join('') || '<div class="empty">无已完成会话</div>';
+  /* 已完成卡: 点按知悉 -> 渐隐消失 */
+  $$('#csDoneBody .cs-card[data-ack]').forEach(el => el.addEventListener('pointerup', () => {
+    if (dragging) return;
+    el.classList.add('fade');
+    setTimeout(() => csMarkRead(el.dataset.ack, Number(el.dataset.ts)), 250);
+  }));
+}
+setInterval(pollSessions, 2000); pollSessions();
+$('#csUsage').addEventListener('pointerup', () => { if (!dragging) openUsageOvl(); });
+$('#csUsageBtn').addEventListener('pointerup', () => openUsageOvl());
+
+/* 滚动歌词: 换歌重建行, 行号变化时平滑滚动居中 + 按距离渐隐 */
+function renderScrollLyrics(wrap, lines, idx, key) {
+  if (!wrap) return;
+  const has = lines && lines.length;
+  if (!has) {
+    const ek = '__empty:' + (np && np.lyricsState === 'none' ? 'none' : (np && np.lyricsState === 'loading' ? 'load' : 'idle'));
+    if (wrap._key !== ek) {
+      wrap.innerHTML = '<div class="lyr-empty">' + (np && np.lyricsState === 'none' ? '(无歌词)' : (np && np.lyricsState === 'loading' ? '歌词加载中…' : '♪')) + '</div>';
+      wrap._key = ek; wrap._scroll = null; wrap._idx = -999;
+    }
+    return;
+  }
+  if (wrap._key !== key) {   // 换歌 -> 重建所有行
+    wrap._key = key; wrap._idx = -999;
+    wrap.innerHTML = '<div class="lyr-scroll">' + lines.map((t, i) => `<div class="lyr-line" data-i="${i}">${esc(t || '♪')}</div>`).join('') + '</div>';
+    wrap._scroll = wrap.querySelector('.lyr-scroll');
+  }
+  const scroll = wrap._scroll; if (!scroll || !scroll.children.length) return;
+  const kids = scroll.children;
+  const center = idx < 0 ? 0 : Math.min(kids.length - 1, idx);
+  const slotH = kids[0].offsetHeight || 74;
+  scroll.style.transform = `translateY(${wrap.clientHeight / 2 - (center + 0.5) * slotH}px)`;   // 当前行垂直居中
+  if (wrap._idx !== idx) {
+    wrap._idx = idx;
+    for (let i = 0; i < kids.length; i++) {
+      const d = Math.abs(i - center);
+      kids[i].classList.toggle('cur', idx >= 0 && i === idx);
+      kids[i].style.opacity = (idx >= 0 && i === idx) ? 1 : Math.max(0.10, 0.6 - d * 0.15);
+    }
+  }
+}
+
+/* 正在播放 + 歌词 */
+let np = null;
+async function pollNp() {
+  np = await get('/api/nowplaying');
+  const playing = np && np.title;   // 有媒体会话就显示(暂停也显示歌名), playing 只控制播放键图标
+  $('#npTitle').textContent = playing ? np.title : '未在播放';
+  $('#npArtist').textContent = playing ? (np.artist || '—') : '—';
+  $('#npBar').style.width = playing && np.dur ? (np.pos / np.dur * 100) + '%' : '0%';
+  $('#npPos').textContent = fmtT(np && np.pos); $('#npDur').textContent = fmtT(np && np.dur);
+  /* 专辑封面: SMTC 缩略图, cover 是版本号, 变了才换图 */
+  const cov = playing && np.cover ? np.cover : 0;
+  if (pollNp._cover !== cov) {
+    pollNp._cover = cov;
+    [$('#npCover'), $('#mCover')].forEach(el => {
+      if (!el) return;
+      el.classList.toggle('has-img', !!cov);
+      el.style.backgroundImage = cov ? `url(/api/nowplaying/cover?k=${cov})` : '';
+    });
+  }
+  const lyrLines = playing ? np.lines : null;
+  const lyrIdx = playing && np.idx != null ? np.idx : -1;
+  const lyrKey = playing ? (np.key || np.title) : '';
+  renderScrollLyrics($('#lyricsCard'), lyrLines, lyrIdx, lyrKey);
+  renderScrollLyrics($('#mLyrics'), lyrLines, lyrIdx, lyrKey);
+  /* 媒体页信息 */
+  $('#mTitle').textContent = playing ? np.title : '未在播放';
+  $('#mArtist').textContent = playing ? (np.artist || '—') : '—';
+  $('#mProgBar').style.width = playing && np.dur ? (np.pos / np.dur * 100) + '%' : '0%';
+  $('#mProgKnob').style.left = playing && np.dur ? (np.pos / np.dur * 100) + '%' : '0%';
+  $('#mProgT').textContent = `${fmtT(np && np.pos)} / ${fmtT(np && np.dur)}`;
+  $('#playIcon').innerHTML = playing && np.playing ? '<path d="M7 4h4v16H7zM13 4h4v16h-4z"/>' : '<path d="M7 4l13 8-13 8z"/>';
+  $('#cNp').textContent = playing ? np.title : '—';
+}
+setInterval(pollNp, 1000); pollNp();
+
+/* 天气 / 日程 / 通知 / 健康 */
+let extras = null, dndOn = localStorage.getItem('wide-dnd') === '1';
+function renderExtras() {
+  if (!extras) return;
+  const w = extras.weather;
+  if (w && w.ok) {
+    $('#wIcon').textContent = w.icon; $('#wTemp').textContent = Math.round(w.temp) + '°';
+    $('#wDesc').textContent = w.desc; $('#wHiLo').textContent = `${Math.round(w.hi)}° / ${Math.round(w.lo)}°`;
+    const hrs = (w.hourlyProb || []).slice(0, 3);
+    const h0 = new Date().getHours();
+    $('#wFc').innerHTML = hrs.map((p, i) => `<div class="h">${(h0 + i + 1) % 24}时<b>${p}%</b></div>`).join('');
+    $('#mwIcon').textContent = w.icon; $('#mwTemp').textContent = Math.round(w.temp) + '°';
+    $('#mwDesc').textContent = `${w.desc} · ${Math.round(w.hi)}°/${Math.round(w.lo)}°`;
+  }
+  const cal = extras.calendar;
+  const calList = $('#calList');
+  if (cal && cal.ok && cal.events && cal.events.length) {
+    calList.innerHTML = cal.events.slice(0, 5).map(ev => `<div class="cal-item"><span class="t">${esc(ev.time || ev.t || '')}</span><span class="n">${esc(ev.title || ev.name || '')}</span></div>`).join('');
+  } else if (cal && cal.today && cal.today.length) {
+    calList.innerHTML = cal.today.slice(0, 5).map(ev => `<div class="cal-item"><span class="t">${esc(ev.time || '')}</span><span class="n">${esc(ev.title || '')}</span></div>`).join('');
+  } else calList.innerHTML = `<div class="empty">${cal && cal.icsSet === false ? '未设置日历订阅' : '今日无日程'}</div>`;
+  const nt = extras.notify;
+  const ntfList = $('#ntfList');
+  if (nt && nt.recent && nt.recent.length && !dndOn) {
+    ntfList.innerHTML = nt.recent.slice(0, 4).map(n => `
+      <div class="ntf-item"><div class="ic">${esc((n.app || '?')[0])}</div>
+      <div class="tx"><div class="a">${esc(n.app)} · ${esc(n.title)}</div><div class="b">${esc(n.body)}</div></div></div>`).join('');
+  } else ntfList.innerHTML = `<div class="empty">${dndOn ? '勿扰中' : (nt && nt.status === 'allowed' ? '暂无通知' : '未开启通知权限')}</div>`;
+  const gm = $('#gameNtfList');
+  if (gm && nt && nt.recent) gm.innerHTML = nt.recent.slice(0, 3).map(n => `
+      <div class="ntf-item"><div class="ic">${esc((n.app || '?')[0])}</div>
+      <div class="tx"><div class="a">${esc(n.app)}</div><div class="b">${esc(n.title)}</div></div></div>`).join('') || '<div class="empty">无</div>';
+  const h = extras.health, dot = $('#healthDot');
+  if (h) {
+    dot.className = h.ok ? 'ok' : 'bad'; dot.id = 'healthDot';
+    dot.classList.add(h.ok ? 'ok' : 'bad');
+    $('#healthName').textContent = 'home-server · ' + (h.ok ? '正常' : '离线');
+    const up = h.upSince ? Math.floor((Date.now() - h.upSince) / 86400000) : 0;
+    $('#healthMeta').textContent = h.ok ? `${h.ms} ms · 已运行 ${up} 天` : (h.error || 'HTTP ' + h.status);
+  } else { $('#healthName').textContent = '服务器未配置'; $('#healthMeta').textContent = '管理台可设置健康检查地址'; }
+}
+async function pollExtras() { extras = await get('/api/extras'); renderExtras(); renderTiles(); }
+setInterval(pollExtras, 2000); pollExtras();
+
+/* 全局热键翻页 */
+function wideFlip(dir) {
+  if (gameOn || ovlMask.classList.contains('show')) return;   // 副驾驶/弹层时不翻
+  gotoPage(Math.max(0, Math.min(3, page + (dir < 0 ? -1 : 1))));
+}
+/* 主通道 = SSE: 按键即时推, 几十毫秒到, 跟手 */
+let wideEs = null;
+function connectWideSse() {
+  try { wideEs = new EventSource('/api/wide/events'); } catch { return; }
+  wideEs.addEventListener('page', e => { lastWpSeq = null; wideFlip(Number(e.data)); });   // 收到即翻, 并让轮询重记基线避免重复翻
+  wideEs.onerror = () => {};   // EventSource 自带重连(retry)
+}
+connectWideSse();
+/* 兜底 = 轮询 seq: SSE 万一断了, 靠 1s 轮询补上(不会和 SSE 重复翻: SSE 翻完把基线清了) */
+let lastWpSeq = null;
+async function pollStats() {
+  stats = await get('/api/stats'); renderTiles(); renderGame();
+  if (stats && stats.wpSeq != null) {
+    if (lastWpSeq == null) lastWpSeq = stats.wpSeq;
+    else if (stats.wpSeq !== lastWpSeq) {
+      const dir = stats.wpDir; lastWpSeq = stats.wpSeq;
+      wideFlip(dir);
+    }
+  }
+}
+setInterval(pollStats, 1000); pollStats();
+async function pollHist() { hist = (await get('/api/history/all?n=60')) || {}; renderTileSparks(); renderGameSparks(); }
+setInterval(pollHist, 5000); pollHist();
+
+/* ==================== 音频 ==================== */
+let audio = null, volDragging = false, miniSig = '', ovlSig = '';
+/* 设备真名: 取括号内内容(扬声器 (ADAM Audio D3V ) -> ADAM Audio D3V) */
+function devName(n) {
+  const m = String(n || '').match(/\(([^)]*)\)/);
+  return ((m ? m[1] : String(n || '').replace(/^扬声器\s*/, '')).trim()) || String(n || '');
+}
+/* 按软件名合并会话(斗鱼开两个直播间=两个进程 -> 合并成一条, 控制时对全部 pid 生效) */
+function aggSessions(list) {
+  const map = new Map();
+  for (const s of (list || [])) {
+    const key = s.display || s.name || String(s.pid);
+    let g = map.get(key);
+    if (!g) { g = { key, name: s.display || s.name, pids: [], vol: 0, muted: true }; map.set(key, g); }
+    g.pids.push(s.pid);
+    g.vol = Math.max(g.vol, s.vol);      // 组音量取最大
+    g.muted = g.muted && !!s.muted;      // 全部静音才算静音
+  }
+  return [...map.values()].slice(0, 8);
+}
+function aggSig(gs) { return gs.map(g => g.key + ':' + g.pids.join('.')).join('|'); }
+function audioApp(pids, patch) { (pids || []).forEach(p => post('/api/audio', Object.assign({ app: p }, patch))); }
+function renderAudio() {
+  const m = audio && audio.master;
+  const vol = m ? m.vol : null;
+  ['#volVal', '#volVal2', '#volVal3'].forEach(s => { const el = $(s); if (el) el.textContent = vol != null ? vol : '--'; });
+  if (!volDragging && !uiBusy) $$('[data-slider^="volume"]').forEach(r => setRail(r, vol || 0));
+  const mb = $('#sndMuteBtn'); if (mb && m) mb.classList.toggle('muted', !!m.muted);
+  $$('[data-vmute]').forEach(el => el.classList.toggle('muted', !!(m && m.muted)));   // 底栏喇叭静音态联动
+  const micBtn = $('#btnMic'); if (micBtn && audio && audio.mic) micBtn.classList.toggle('on', !!audio.mic.muted);
+  /* 操控台迷你混音条: 合并后按 idx 原地更新, 手指按着时完全不动 DOM */
+  const wrap = $('#sndApps');
+  if (wrap && audio && audio.sessions && !uiBusy) {
+    const gs = aggSessions(audio.sessions.filter(s => s.pid !== 0));
+    const sig = aggSig(gs);
+    if (sig !== miniSig) {
+      miniSig = sig;
+      wrap.innerHTML = gs.map((g, i) => `
+        <div class="snd-app ${g.muted ? 'muted' : ''}" data-idx="${i}">
+          <div class="ic">${esc((g.name || '?')[0].toUpperCase())}</div>
+          <div class="bar"><div class="rail" data-idx="${i}"><i style="width:${g.muted ? 0 : g.vol}%"></i></div></div>
+          <div class="nm">${esc(g.name)}</div>
+        </div>`).join('') || '<div class="empty" style="flex:1">无活动音频会话</div>';
+      wrap.querySelectorAll('.rail[data-idx]').forEach(rail => { const g = gs[+rail.dataset.idx]; hDrag(rail, pct => {
+        const v = Math.round(pct * 100);
+        rail.querySelector('i').style.width = (pct * 100) + '%';
+        const col = rail.closest('.snd-app');
+        if (col && col.classList.contains('muted')) { col.classList.remove('muted'); g.muted = false; audioApp(g.pids, { muted: false }); }
+        g.vol = v;
+        clearTimeout(rail._t); rail._t = setTimeout(() => audioApp(g.pids, { vol: v }), 120);
+      }); });
+    } else {
+      gs.forEach((g, i) => {
+        const col = wrap.querySelector(`.snd-app[data-idx="${i}"]`);
+        if (!col) return;
+        col.classList.toggle('muted', !!g.muted);
+        const bi = col.querySelector('.rail > i'); if (bi) bi.style.width = (g.muted ? 0 : g.vol) + '%';
+      });
+    }
+  }
+  if (ovlKind === 'sound' && !uiBusy) renderSoundOvl();
+  const outLb = $('#outputLb');
+  if (outLb && audio && audio.devices) {
+    const def = audio.devices.find(d => d.default);
+    outLb.textContent = def ? devName(def.name).slice(0, 10) : '输出';
+  }
+}
+async function pollAudio() { const a = await get('/api/audio'); if (a && a.ok !== false) audio = a; renderAudio(); }
+setInterval(pollAudio, 2000); pollAudio();
+
+$$('[data-slider^="volume"]').forEach(rail => hDrag(rail, pct => {
+  volDragging = true; clearTimeout(hDrag._vt); hDrag._vt = setTimeout(() => volDragging = false, 800);
+  setRail(rail, pct * 100);
+  const v = Math.round(pct * 100);
+  ['#volVal', '#volVal2', '#volVal3'].forEach(s => { const el = $(s); if (el) el.textContent = v; });
+  clearTimeout(hDrag._va); hDrag._va = setTimeout(() => post('/api/audio', { master: v }), 120);
+}));
+let briVal = Number(localStorage.getItem('wide-bright') || 80);
+$$('[data-slider="bright"]').forEach(rail => { setRail(rail, briVal); hDrag(rail, pct => {
+  briVal = Math.round(pct * 100); setRail(rail, briVal);
+  $('#briVal').textContent = briVal; localStorage.setItem('wide-bright', briVal);
+  clearTimeout(hDrag._bt); hDrag._bt = setTimeout(() => post('/api/wide/brightness', { value: briVal }), 250);
+}); });
+$('#briVal').textContent = briVal;
+function toggleMasterMute() {
+  if (!audio || !audio.master) return;
+  const next = !audio.master.muted;
+  audio.master.muted = next; renderAudio();   // 乐观更新: 三页喇叭/操控台按钮立即联动
+  post('/api/audio', { muteMaster: next }).then(() => setTimeout(pollAudio, 300));
+}
+const mbtn = $('#sndMuteBtn');
+if (mbtn) mbtn.addEventListener('pointerup', toggleMasterMute);
+$$('[data-vmute]').forEach(el => el.addEventListener('pointerup', e => { e.stopPropagation(); toggleMasterMute(); }));
+
+/* 声音弹层 */
+let devSig = '';
+function renderSoundOvl() {
+  if (!audio) return;
+  const devs = $('#sndDevList');
+  const favs = favDevices();
+  const dsig = favs.map(d => d.id + (d.default ? '*' : '')).join(',');
+  if (devs && dsig !== devSig) {
+    devSig = dsig;
+    devs.innerHTML = favs.map(d => `
+    <div class="dev press-sm ${d.default ? 'on' : ''}" data-dev="${esc(d.id)}">
+      <svg viewBox="0 0 24 24"><path d="M4 14a8 8 0 0 1 16 0"/><rect x="2.5" y="14" width="4.5" height="6" rx="2"/><rect x="17" y="14" width="4.5" height="6" rx="2"/></svg>
+      <div class="tx"><div class="nm">${esc(devName(d.name))}</div><div class="ds">${d.default ? '当前输出' : ''}</div></div>
+      ${d.default ? '<span class="tag">✓ 默认</span>' : ''}
+    </div>`).join('');
+    devs.querySelectorAll('.dev').forEach(el => el.addEventListener('pointerup', () => {
+      post('/api/audio', { device: el.dataset.dev }).then(() => { toast('已切换输出设备'); setTimeout(pollAudio, 600); });
+    }));
+  }
+  const mrail = $('#sndOvlRail');
+  if (mrail && audio.master && !volDragging && !uiBusy) { setRail(mrail, audio.master.vol); $('#sndOvlVal').textContent = audio.master.vol; }
+  const mix = $('#mixCols');
+  if (mix) {
+    const gs = aggSessions((audio.sessions || []).filter(s => s.pid !== 0)).slice(0, 6);
+    const sig = aggSig(gs);
+    if (sig !== ovlSig || !mix.children.length) {   // 结构变了才重建, 否则原地更新(拖动中的推子绝不销毁)
+      ovlSig = sig;
+      mix.innerHTML = gs.map((g, i) => `
+        <div class="mix ${g.muted ? 'muted' : ''}" data-idx="${i}">
+          <div class="ic">${esc((g.name || '?')[0].toUpperCase())}</div>
+          <div class="nm">${esc(g.name)}</div>
+          <div class="fader" data-idx="${i}"><i style="height:${g.muted ? 0 : g.vol}%"></i></div>
+          <div class="v">${g.muted ? 0 : g.vol}</div>
+          <div class="mut press-sm" data-idx="${i}">${g.muted ? '取消静音' : '静音'}</div>
+          <div class="appout press-sm" data-idx="${i}"><svg viewBox="0 0 24 24"><path d="M4 14a8 8 0 0 1 16 0"/><rect x="2.5" y="14" width="4.5" height="6" rx="2"/><rect x="17" y="14" width="4.5" height="6" rx="2"/></svg><span>${esc(appOutLabel(g.name))}</span></div>
+        </div>`).join('') || '<div class="empty">无活动音频会话</div>';
+      mix.querySelectorAll('.appout[data-idx]').forEach(b => { const g = gs[+b.dataset.idx]; b.addEventListener('pointerup', e => {
+        e.stopPropagation(); openAppOutPick(b, g);
+      }); });
+      mix.querySelectorAll('.fader[data-idx]').forEach(f => { const g = gs[+f.dataset.idx]; vDrag(f, pct => {
+        const v = Math.round(pct * 100);
+        f.querySelector('i').style.height = (pct * 100) + '%';
+        const col = f.closest('.mix'); col.querySelector('.v').textContent = v;
+        if (col.classList.contains('muted')) {   // 静音态直接拖 -> 解除静音
+          col.classList.remove('muted'); col.querySelector('.mut').textContent = '静音'; g.muted = false;
+          audioApp(g.pids, { muted: false });
+        }
+        g.vol = v;
+        clearTimeout(f._t); f._t = setTimeout(() => audioApp(g.pids, { vol: v }), 120);
+      }); });
+      mix.querySelectorAll('.mut[data-idx]').forEach(b => { const g = gs[+b.dataset.idx]; b.addEventListener('pointerup', e => {
+        e.stopPropagation();
+        const col = b.closest('.mix');
+        const willMute = !col.classList.contains('muted');
+        audioApp(g.pids, { muted: willMute }); g.muted = willMute; setTimeout(pollAudio, 500);
+        col.classList.toggle('muted', willMute); b.textContent = willMute ? '取消静音' : '静音';
+        const bi = col.querySelector('.fader > i'); if (bi) bi.style.height = (willMute ? 0 : g.vol) + '%';   // 静音归零, 取消静音恢复
+        col.querySelector('.v').textContent = willMute ? 0 : g.vol;
+      }); });
+    } else {
+      gs.forEach((g, i) => {
+        const col = mix.querySelector(`.mix[data-idx="${i}"]`);
+        if (!col) return;
+        col.classList.toggle('muted', !!g.muted);
+        col.querySelector('.mut').textContent = g.muted ? '取消静音' : '静音';
+        const bi = col.querySelector('.fader > i'); if (bi) bi.style.height = (g.muted ? 0 : g.vol) + '%';
+        col.querySelector('.v').textContent = g.muted ? 0 : g.vol;
+      });
+    }
+  }
+  const micB = $('#micBigBtn');
+  if (micB && audio.mic) {
+    micB.classList.toggle('muted', !!audio.mic.muted);
+    $('#micState').textContent = audio.mic.muted ? '已静音' : '拾音中';
+    $('#micState').className = audio.mic.muted ? 'off' : '';
+    $('#micState').id = 'micState';
+    $('#micName').textContent = audio.mic.name || '';
+  }
+}
+function openSoundOvl() {
+  ovlSig = ''; devSig = '';   // 强制重建弹层内容
+  openOvl('sound', '声音控制', '点弹层外空白关闭', `
+    <div id="sndOvl">
+      <div id="sndDevCol"><h4 class="ovl-h4">声音输出</h4><div id="sndDevList"></div>
+        <div id="sndOvlMaster"><div class="lbl">主音量</div>
+          <div style="display:flex;align-items:center;gap:20px">
+            <div class="rail" id="sndOvlRail" style="flex:1;height:16px;border-radius:8px;background:#1a212c;position:relative"><i style="position:absolute;left:0;top:0;bottom:0;border-radius:8px;background:var(--accent)"></i><div class="knob" style="position:absolute;top:50%;transform:translate(-50%,-50%);width:44px;height:44px;border-radius:50%;background:#F5F8FC;box-shadow:0 2px 10px rgba(0,0,0,.6)"></div></div>
+            <span id="sndOvlVal" style="font-size:34px;font-weight:800;font-family:'JetBrains Mono'">--</span>
+          </div></div>
+      </div>
+      <div id="mixWrap"><h4 class="ovl-h4">分应用音量 · 拖推子调音量 · 静音 · 点⌂选输出设备</h4><div id="mixCols"></div></div>
+      <div id="micCol"><h4 class="ovl-h4">麦克风</h4>
+        <div id="micBigBtn" class="press-sm"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg><span>点按静音 · 方便盲按</span></div>
+        <div id="micState">—</div><div id="micName"></div>
+      </div>
+    </div>`);
+  hDrag($('#sndOvlRail'), pct => {
+    setRail($('#sndOvlRail'), pct * 100); $('#sndOvlVal').textContent = Math.round(pct * 100);
+    clearTimeout(openSoundOvl._t); openSoundOvl._t = setTimeout(() => post('/api/audio', { master: Math.round(pct * 100) }), 120);
+  });
+  $('#micBigBtn').addEventListener('pointerup', () => {
+    if (audio && audio.mic) post('/api/audio', { mic: !audio.mic.muted }).then(() => setTimeout(pollAudio, 500));
+  });
+  renderSoundOvl();
+}
+$('#sndTile').addEventListener('pointerup', e => {
+  if (e.target.closest('.rail') || e.target.closest('.mute-btn') || uiBusy) return;   // 拖滑条不触发; 点迷你应用列=打开完整控制
+  openSoundOvl();
+});
+
+/* ==================== 操控台: 应用启动 ==================== */
+async function initApps() {
+  const r = await get('/api/config');
+  const apps = (r && r.config && r.config.apps) || [];
+  $('#appGrid').innerHTML = apps.map(a => `
+    <div class="app press-tile" data-app="${esc(a.id)}" ${a.long ? 'data-long="1"' : ''}>
+      <div class="ic" style="background:${esc(a.color || '#334155')}">${esc(a.ch || a.label[0])}</div>
+      <div class="lb">${esc(a.label)}</div>
+      ${a.long ? '<span class="hint">长按更多</span>' : ''}
+    </div>`).join('');
+  $$('#appGrid .app').forEach(el => {
+    const id = el.dataset.app;
+    if (el.dataset.long) bindHold(el, 600, () => openSteamOvl(), () => launchApp(id));
+    else el.addEventListener('pointerup', () => launchApp(id));
+  });
+}
+function launchApp(id) { post('/api/launch', { id }).then(r => toast(r && r.ok ? '已启动' : '启动失败')); }
+initApps();
+
+/* Steam 弹层 */
+async function openSteamOvl() {
+  openOvl('steam', 'STEAM', '短按图标=直接打开 · 点弹层外关闭', `
+    <div id="steamOvl">
+      <div id="steamActs">
+        <div class="sact primary press-tile" data-sopen="bigpicture"><div class="a">大屏模式</div><div class="b">在主屏启动 Big Picture</div></div>
+        <div class="sact press-tile" data-sopen="store"><div class="a">商店</div><div class="b">Steam 商店</div></div>
+        <div class="sact press-tile" data-sopen="games"><div class="a">游戏库</div><div class="b" id="stLibCount">—</div></div>
+        <div class="sact press-tile" data-sopen="friends"><div class="a">好友</div><div class="b">好友列表</div></div>
+      </div>
+      <div><h4 class="ovl-h4" style="margin-bottom:14px">最近游戏</h4><div id="steamRecent"><div class="empty">读取中…</div></div></div>
+      <div id="steamSide"><h4 class="ovl-h4">下载 / 更新</h4><div id="steamDl"><div class="empty">无进行中的下载</div></div></div>
+    </div>`);
+  $$('[data-sopen]').forEach(el => el.addEventListener('pointerup', () => {
+    post('/api/steam/launch', { open: el.dataset.sopen === 'store' ? undefined : el.dataset.sopen, store: el.dataset.sopen === 'store' || undefined });
+    toast('已发送到 Steam');
+  }));
+  const s = await get('/api/steam');
+  if (!s || !s.ok) { $('#steamRecent').innerHTML = `<div class="empty">${esc((s && s.error) || 'Steam 未找到')}</div>`; return; }
+  $('#stLibCount').textContent = `共 ${s.games.length}+ 款`;
+  const fmtAgo = ts => { if (!ts) return ''; const d = Math.floor((Date.now() / 1000 - ts) / 86400); return d <= 0 ? '今天' : d === 1 ? '昨天' : d + ' 天前'; };
+  $('#steamRecent').innerHTML = s.games.slice(0, 4).map(g => `
+    <div class="sgame">
+      <div class="ic">${esc(g.name[0])}</div>
+      <div class="tx"><div class="a">${esc(g.name)}</div><div class="b">${g.sizeGB} GB · 上次 ${fmtAgo(g.lastPlayed)}</div></div>
+      <div class="go press-sm" data-appid="${g.appid}">${g.updating ? '更新中' : '启动'}</div>
+    </div>`).join('');
+  $$('#steamRecent .go').forEach(b => b.addEventListener('pointerup', () => {
+    post('/api/steam/launch', { appid: Number(b.dataset.appid) }); toast('正在启动游戏…');
+  }));
+  if (s.downloads && s.downloads.length) {
+    $('#steamDl').innerHTML = s.downloads.map(d => {
+      const pct = d.bytesToDownload ? Math.round(d.bytesDownloaded / d.bytesToDownload * 100) : 0;
+      return `<div class="dl"><div class="a">${esc(d.name)}</div><div class="b">${(d.bytesDownloaded / 2 ** 30).toFixed(1)} / ${(d.bytesToDownload / 2 ** 30).toFixed(1)} GB</div><div class="hbar"><i style="width:${pct}%"></i></div></div>`;
+    }).join('');
+  }
+}
+
+/* ==================== 底栏动作 ==================== */
+let pomoEnd = 0, pomoT = null;
+document.body.addEventListener('pointerup', e => {
+  const btn = e.target.closest('[data-act]');
+  if (!btn) return;
+  const act = btn.dataset.act;
+  if (act === 'screenshot') post('/api/system/screenshot').then(r => toast(r && r.ok ? '已截图 → 图片库' : '截图失败'));
+  else if (act === 'micmute') { if (audio && audio.mic) post('/api/audio', { mic: !audio.mic.muted }).then(() => { pollAudio(); toast(audio.mic.muted ? '麦克风已开启' : '麦克风已静音'); }); }
+  else if (act === 'dnd') { dndOn = !dndOn; localStorage.setItem('wide-dnd', dndOn ? '1' : '0'); $('#btnDnd').classList.toggle('on', dndOn); toast(dndOn ? '勿扰已开启(隐藏通知)' : '勿扰已关闭'); renderExtras(); }
+  else if (act === 'awake') post('/api/system/awake', { on: !$('#btnAwake').classList.contains('on') }).then(r => { $('#btnAwake').classList.toggle('on', r && r.awake); toast(r && r.awake ? '防息屏已开启' : '防息屏已关闭'); });
+  else if (act === 'note') toast('便签:后续版本接入');
+  else if (act === 'pomo') {
+    if (pomoEnd) { pomoEnd = 0; clearInterval(pomoT); $('#pomoLb').textContent = '番茄钟'; $('#btnPomo').classList.remove('on'); toast('番茄钟已取消'); }
+    else {
+      pomoEnd = Date.now() + 25 * 60 * 1000; $('#btnPomo').classList.add('on'); toast('番茄钟 25:00 开始');
+      pomoT = setInterval(() => {
+        const left = pomoEnd - Date.now();
+        if (left <= 0) { clearInterval(pomoT); pomoEnd = 0; $('#pomoLb').textContent = '番茄钟'; $('#btnPomo').classList.remove('on'); toast('🍅 番茄钟完成!'); return; }
+        $('#pomoLb').textContent = fmtT(left / 1000);
+      }, 1000);
+    }
+  }
+  else if (act === 'net' || act === 'bt') toast('系统开关暂未接入(需要系统权限)');
+  else if (act === 'captions') post('/api/captions').then(r => toast(r && r.ok ? '已切换实时字幕' : '暂未接入'));
+  else if (act === 'copilot') enterGame('手动进入', true);
+  else if (act === 'output') toggleOutPick();
+});
+$$('[data-power]').forEach(el => bindHold(el, 1500, () => {
+  post('/api/power', { action: el.dataset.power });
+  toast({ lock: '锁屏中…', sleep: '进入睡眠…', restart: '3 秒后重启', shutdown: '3 秒后关机' }[el.dataset.power]);
+}, () => toast('长按 1.5 秒触发')));
+$$('[data-media]').forEach(el => el.addEventListener('pointerup', () => post('/api/media', { key: el.dataset.media })));
+
+/* ---------- 输出设备快切: 按钮上方弹小列表(只显示 config.audio.favorites 匹配的设备) ---------- */
+let CFG = null;
+get('/api/config').then(r => { CFG = (r && r.config) || {}; });
+function favDevices() {
+  if (!audio || !audio.devices) return [];
+  const favs = (CFG && CFG.audio && CFG.audio.favorites) || ['ADAM', 'Realtek'];
+  const list = audio.devices.filter(d => favs.some(f => d.name.toLowerCase().includes(String(f).toLowerCase())));
+  return list.length ? list : audio.devices;   // 一个都匹配不上就退回全列表
+}
+/* 分应用输出: 记住每个应用上次选的设备(localStorage), 按钮上显示 */
+function appOutLabel(name) {
+  const id = localStorage.getItem('appout:' + name);
+  if (!id || !audio || !audio.devices) return '输出设备';
+  const d = audio.devices.find(x => x.id === id);
+  return d ? devName(d.name).slice(0, 8) : '输出设备';
+}
+function openAppOutPick(anchor, g) {
+  const old = $('#appOutPick'); if (old) old.remove();
+  const devs = favDevices();
+  if (!devs.length) { toast('音频服务未就绪'); return; }
+  const savedId = localStorage.getItem('appout:' + g.name);
+  const panel = document.createElement('div');
+  panel.id = 'appOutPick';
+  panel.innerHTML = `<div class="hd">${esc(g.name)} 的输出</div>` + devs.map(d => `
+    <div class="opt press-sm ${d.id === savedId ? 'on' : ''}" data-dev="${esc(d.id)}">
+      <svg viewBox="0 0 24 24"><path d="M4 14a8 8 0 0 1 16 0"/><rect x="2.5" y="14" width="4.5" height="6" rx="2"/><rect x="17" y="14" width="4.5" height="6" rx="2"/></svg>
+      <span>${esc(devName(d.name))}</span>${d.id === savedId ? '<b>✓</b>' : ''}
+    </div>`).join('');
+  document.body.appendChild(panel);
+  const br = anchor.getBoundingClientRect();
+  const scale = 3840 / document.documentElement.getBoundingClientRect().width || 1;
+  const w = 620;
+  panel.style.left = Math.min(3840 - 30 - w, Math.max(20, (br.left + br.width / 2) * scale - w / 2)) + 'px';
+  panel.style.bottom = (1100 - br.top * scale + 14) + 'px';
+  panel.querySelectorAll('.opt').forEach(el => el.addEventListener('pointerup', e => {
+    e.stopPropagation();
+    const devId = el.dataset.dev;
+    post('/api/audio', { apps: g.pids, outDev: devId }).then(r => {
+      if (r && r.ok) {
+        localStorage.setItem('appout:' + g.name, devId);
+        const lb = anchor.querySelector('span'); if (lb) lb.textContent = appOutLabel(g.name);
+        toast(g.name + ' 输出 → ' + el.querySelector('span').textContent);
+      } else toast((r && r.error) || '设置失败');
+    });
+    panel.remove();
+  }));
+  setTimeout(() => document.body.addEventListener('pointerdown', function close(e) {
+    if (!e.target.closest('#appOutPick')) { const p = $('#appOutPick'); if (p) p.remove(); document.body.removeEventListener('pointerdown', close); }
+  }), 50);
+}
+function toggleOutPick() {
+  const old = $('#outPick');
+  if (old) { old.remove(); return; }
+  const devs = favDevices();
+  if (!devs.length) { toast('音频服务未就绪'); return; }
+  const btn = $('#btnOutput'); const br = btn.getBoundingClientRect();
+  const scale = 3840 / document.documentElement.getBoundingClientRect().width || 1;
+  const panel = document.createElement('div');
+  panel.id = 'outPick';
+  panel.innerHTML = devs.map(d => `
+    <div class="opt press-sm ${d.default ? 'on' : ''}" data-dev="${esc(d.id)}">
+      <svg viewBox="0 0 24 24"><path d="M4 14a8 8 0 0 1 16 0"/><rect x="2.5" y="14" width="4.5" height="6" rx="2"/><rect x="17" y="14" width="4.5" height="6" rx="2"/></svg>
+      <span>${esc(devName(d.name))}</span>
+      ${d.default ? '<b>✓</b>' : ''}
+    </div>`).join('');
+  document.body.appendChild(panel);
+  const px = Math.min(3840 - 40 - 720, Math.max(20, (br.left + br.width / 2) * scale - 360));
+  panel.style.left = px + 'px';
+  panel.style.bottom = (1100 - br.top * scale + 16) + 'px';
+  panel.querySelectorAll('.opt').forEach(el => el.addEventListener('pointerup', e => {
+    e.stopPropagation();
+    post('/api/audio', { device: el.dataset.dev }).then(() => { setTimeout(pollAudio, 600); });
+    panel.querySelectorAll('.opt').forEach(x => { x.classList.toggle('on', x === el); x.querySelector('b') && x.querySelector('b').remove(); });
+    el.insertAdjacentHTML('beforeend', '<b>✓</b>');
+    toast('输出 → ' + el.querySelector('span').textContent);
+    setTimeout(() => panel.remove(), 500);
+  }));
+  setTimeout(() => document.body.addEventListener('pointerdown', function close(e) {
+    if (!e.target.closest('#outPick') && !e.target.closest('#btnOutput')) { const p = $('#outPick'); if (p) p.remove(); document.body.removeEventListener('pointerdown', close); }
+  }), 50);
+}
+
+/* ==================== 游戏副驾驶 ==================== */
+let gameOn = false, gameSince = 0, gameManual = false, gameDismissed = '';
+function enterGame(name, manual) {
+  gameOn = true; gameManual = !!manual; gameSince = gameSince || Date.now();
+  $('#gameName').textContent = name;
+  $('#gameIcon').textContent = (name || 'G')[0].toUpperCase();
+  $('#page-game').classList.add('show');
+}
+function exitGame() { gameOn = false; gameSince = 0; gameManual = false; $('#page-game').classList.remove('show'); }
+$('#gameExit').addEventListener('pointerup', () => { gameDismissed = $('#gameName').textContent; exitGame(); });
+async function pollGuard() {
+  const g = await get('/api/mouseguard');
+  const gaming = g && g.state === 'lock' && g.stateDetail;
+  if (gaming && !gameOn && g.stateDetail !== gameDismissed) enterGame(g.stateDetail, false);
+  else if (!gaming && gameOn && !gameManual) { exitGame(); gameDismissed = ''; }
+  else if (!gaming) gameDismissed = '';
+  if (gameOn && gameSince) {
+    const s = Math.floor((Date.now() - gameSince) / 1000);
+    $('#gameMeta').textContent = `本次已运行 ${Math.floor(s / 3600)}:${String(Math.floor(s % 3600 / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}${gameManual ? '' : ' · 检测到游戏进程'}`;
+    $('#gRun').textContent = `本次已运行 ${Math.floor(s / 60)} 分钟`;
+  }
+}
+setInterval(pollGuard, 2000); pollGuard();
+async function pollFps() {
+  if (!gameOn) return;
+  const f = await get('/api/fps'); if (!f) return;
+  if (!f.available) { $('#fpsBig').innerHTML = '<span style="font-size:80px;color:#525E6E">需 PresentMon</span>'; $('#fpsLow').textContent = '--'; $('#fpsMs').textContent = '--'; return; }
+  $('#fpsBig').innerHTML = `${f.fps || '--'}<span class="u">FPS</span>`;
+  $('#fpsLow').textContent = f.low1 || '--';
+  $('#fpsMs').textContent = (f.frameMs || '--') + 'ms';
+  if (f.hist && f.hist.length > 1) drawSpark($('#fpsSpark'), f.hist.map(v => -v), {});
+}
+setInterval(pollFps, 3000);
+function renderGame() {
+  if (!gameOn || !stats) return;
+  const g = stats.gpu, c = stats.cpu;
+  $('#gGpu').innerHTML = `${g.util}<span class="unit">%</span>`;
+  $('#gGpuClk').textContent = (g.clock / 1000).toFixed(2);
+  $('#gGpuT').innerHTML = `${g.temp}<span class="unit">°C</span>`;
+  $('#gGpuP').textContent = Math.round(g.power);
+  $('#gCpu').innerHTML = `${c.util}<span class="unit">%</span>`;
+  $('#gCpuClk').textContent = (c.clock / 1000).toFixed(1);
+  $('#gVram').innerHTML = `${(g.vramUsed / 1024).toFixed(1)}<span class="unit">GB</span>`;
+  $('#gVramP').textContent = Math.round(g.vramUsed / (g.vramTotal || 1) * 100);
+  const ping = extras && extras.net ? extras.net.ping : null;
+  $('#gPing').innerHTML = `${ping != null ? ping : '--'}<span class="unit">ms</span>`;
+  $('#gRx').textContent = extras && extras.net ? (extras.net.rx / 1048576).toFixed(1) : '--';
+}
+function renderGameSparks() {
+  if (!gameOn) return;
+  $$('#gameGrid [data-gspark]').forEach(svg => { const m = svg.dataset.gspark; if (hist[m]) drawSpark(svg, hist[m]); });
+}
+
+/* 通知清除(仅前端隐藏) */
+$('#ntfClear').addEventListener('pointerup', () => { if (extras && extras.notify) { extras.notify.recent = []; renderExtras(); } });
+
+/* 初始化状态 */
+$('#btnDnd').classList.toggle('on', dndOn);
+get('/api/system/awake').then(r => { if (r) $('#btnAwake').classList.toggle('on', !!r.awake); });
+
+/* 调试参数: ?game=1 强制副驾驶, ?ovl=sound|steam|detail 自动开弹层 */
+if (QP.get('game')) setTimeout(() => enterGame('cs2', true), 800);
+if (QP.get('ovl') === 'sound') setTimeout(openSoundOvl, 1200);
+if (QP.get('ovl') === 'steam') setTimeout(openSteamOvl, 1200);
+if (QP.get('ovl') === 'detail') setTimeout(() => openDetail('gpu'), 1200);
+if (QP.get('ovl') === 'usage') setTimeout(openUsageOvl, 1200);
+})();

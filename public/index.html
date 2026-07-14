@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>ProArt 副屏仪表盘</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/widgets.css">
+<style>
+  :root { --accent: #3987e5; --muted: #8b8981; --hair: rgba(255,255,255,0.08); }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; overflow: hidden; }
+  body {
+    background: radial-gradient(1100px 600px at 15% -10%, #17171a 0%, transparent 60%), #0b0b0a;
+    color: #fff;
+    font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+    cursor: none;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { width: 960px; height: 640px; padding: 12px; }
+  #grid {
+    display: grid; width: 100%; height: 100%;
+    grid-template-columns: repeat(4, 1fr); grid-template-rows: repeat(4, 1fr);
+    gap: 10px; grid-auto-flow: dense;
+  }
+
+  /* 切页页名提示: 显示 ~1s 后淡出 */
+  #pageToast {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    z-index: 45; pointer-events: none; opacity: 0;
+  }
+  #pageToast.show { animation: toastFade 1.8s ease forwards; }
+  @keyframes toastFade { 0% { opacity: 0; } 10% { opacity: 1; } 55% { opacity: 1; } 100% { opacity: 0; } }
+  #pageToast .pt-card {
+    padding: 16px 52px 20px; border-radius: 22px;
+    background: rgba(14,13,11,.88); border: 1px solid var(--hair);
+    box-shadow: 0 14px 50px rgba(0,0,0,.6); text-align: center;
+  }
+  #pageToast.show .pt-card { animation: toastPop .4s cubic-bezier(.2,1.3,.4,1); }
+  @keyframes toastPop { from { transform: scale(.9); } to { transform: scale(1); } }
+  #pageToast .pt-name { font-size: 46px; font-weight: 720; letter-spacing: -.5px; }
+  #pageToast .pt-idx { font-size: 15px; color: var(--muted); margin-top: 4px; font-variant-numeric: tabular-nums; }
+
+  /* 手机通知横幅: 顶部滑入, 停留后滑出 */
+  #ntfBanner {
+    position: fixed; top: 0; left: 50%; transform: translate(-50%, -130%);
+    z-index: 55; transition: transform .38s cubic-bezier(.3,1.1,.4,1);
+    pointer-events: none; max-width: 88%;
+  }
+  #ntfBanner.on { transform: translate(-50%, 14px); }
+  #ntfBanner .nb-card {
+    display: flex; align-items: center; gap: 14px;
+    background: rgba(20,19,17,.96); border: 1px solid rgba(255,255,255,.14);
+    border-radius: 18px; padding: 13px 22px;
+    box-shadow: 0 12px 44px rgba(0,0,0,.65);
+  }
+  #ntfBanner .nb-ico { font-size: 30px; flex: none; }
+  #ntfBanner .nb-txt { min-width: 0; }
+  #ntfBanner .nb-t { font-size: 19px; font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #ntfBanner .nb-b { font-size: 15px; color: #c3c2b7; margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* 页码指示点 */
+  #dots { position: fixed; bottom: 4px; left: 50%; transform: translateX(-50%); display: flex; gap: 7px; z-index: 40; }
+  #dots i { width: 6px; height: 6px; border-radius: 50%; background: rgba(255,255,255,.18); }
+  #dots i.on { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+
+  /* 全屏提示动画 */
+  .fx { position: fixed; inset: 0; pointer-events: none; z-index: 50; display: none; }
+  .fx.on { display: block; }
+  #alertFx .backdrop { position: absolute; inset: 0; background: rgba(0,0,0,.62); animation: fadeIn .25s ease-out; }
+  #alertFx .ring { position: absolute; inset: 0; animation: alertRing 1.05s ease-in-out infinite; }
+  @keyframes alertRing {
+    0%,100% { box-shadow: inset 0 0 0 4px rgba(250,178,25,.30), inset 0 0 70px rgba(250,178,25,.10); }
+    50%     { box-shadow: inset 0 0 0 14px rgba(250,178,25,.95), inset 0 0 130px rgba(250,178,25,.45); }
+  }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+  .fx-card {
+    position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+    text-align: center; white-space: nowrap;
+    padding: 26px 56px 30px; border-radius: 24px;
+    background: rgba(14,13,11,.94);
+    box-shadow: 0 18px 60px rgba(0,0,0,.7);
+  }
+  #alertFx .fx-card { border: 2px solid rgba(250,178,25,.55); }
+  #doneFx .fx-card  { border: 2px solid rgba(12,163,12,.55); }
+  #alertFx .fx-title {
+    font-size: 62px; font-weight: 750; letter-spacing: -1px; color: #ffce5c;
+    text-shadow: 0 0 40px rgba(250,178,25,.6);
+    animation: alertBeat 1.05s ease-in-out infinite;
+  }
+  @keyframes alertBeat { 0%,100% { transform: scale(1); } 50% { transform: scale(1.07); } }
+  #alertFx .fx-sub { font-size: 24px; color: #f0e6d2; margin-top: 10px; font-weight: 500; }
+  .fx-icon { font-size: 74px; line-height: 1; margin-bottom: 6px; }
+  #doneFx .sweep {
+    position: absolute; inset: 0;
+    background: linear-gradient(105deg, transparent 38%, rgba(12,163,12,.42) 50%, transparent 62%);
+    transform: translateX(-100%);
+    animation: sweep 1.05s cubic-bezier(.3,0,.2,1) forwards;
+  }
+  @keyframes sweep { to { transform: translateX(100%); } }
+  #doneFx .glowring { position: absolute; inset: 0; animation: doneRing 1.6s ease-out forwards; }
+  @keyframes doneRing {
+    0%   { box-shadow: inset 0 0 0 0 rgba(12,163,12,0); }
+    30%  { box-shadow: inset 0 0 0 12px rgba(12,163,12,.8), inset 0 0 120px rgba(12,163,12,.35); }
+    100% { box-shadow: inset 0 0 0 0 rgba(12,163,12,0); }
+  }
+  #doneFx .backdrop { position: absolute; inset: 0; background: rgba(0,0,0,.62); animation: fadeIn .25s ease-out; }
+  /* 入场弹一下后停住不淡出: 常驻等按键确认 */
+  #doneFx .fx-card { animation: donePop .9s cubic-bezier(.2,1.4,.35,1) forwards; }
+  @keyframes donePop {
+    0%   { opacity: 0; transform: translate(-50%,-50%) scale(.4); }
+    55%  { opacity: 1; transform: translate(-50%,-50%) scale(1.06); }
+    100% { opacity: 1; transform: translate(-50%,-50%) scale(1); }
+  }
+  #doneFx .fx-title { font-size: 60px; font-weight: 750; color: #7ee87e; text-shadow: 0 0 40px rgba(12,163,12,.7); }
+  #doneFx .fx-sub { font-size: 24px; color: #cfeccf; margin-top: 12px; font-weight: 500; }
+  .confetti { position: absolute; width: 9px; height: 9px; opacity: 0; }
+</style>
+</head>
+<body>
+<div class="wrap"><div id="grid"></div></div>
+<div id="dots"></div>
+<div id="pageToast"><div class="pt-card"><div class="pt-name"></div><div class="pt-idx"></div></div></div>
+<div id="ntfBanner"><div class="nb-card"><span class="nb-ico">🔔</span><div class="nb-txt"><div class="nb-t" id="nbT"></div><div class="nb-b" id="nbB"></div></div></div></div>
+
+<div class="fx" id="alertFx">
+  <div class="backdrop"></div>
+  <div class="ring"></div>
+  <div class="fx-card">
+    <div class="fx-icon">🔑</div>
+    <div class="fx-title">需要你授权</div>
+    <div class="fx-sub" id="alertSub"></div>
+  </div>
+</div>
+<div class="fx" id="doneFx">
+  <div class="backdrop"></div>
+  <div class="sweep"></div>
+  <div class="glowring"></div>
+  <div class="fx-card">
+    <div class="fx-icon">✅</div>
+    <div class="fx-title">本轮完成</div>
+    <div class="fx-sub" id="doneSub">按亮度键 / 热键 确认</div>
+  </div>
+</div>
+
+<script src="/lottie_light.min.js"></script>
+<script src="/widgets.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const DEMO = new URLSearchParams(location.search).get('demo');
+const esc = W.esc;
+
+/* ---------- 配置驱动的面板渲染 ---------- */
+let CFG = null, curRev = -1, curPage = -1;
+let lotties = [];   // 当前页面上的踢足球 Lottie 实例
+
+function renderPage() {
+  const grid = $('grid');
+  lotties.forEach(l => { try { l.destroy(); } catch {} });
+  lotties = [];
+  grid.innerHTML = '';
+  const page = (CFG.pages || [])[curPage] || { panels: [] };
+  for (const p of page.panels || []) {
+    const t = document.createElement('div');
+    const sz = W.sizeClass(p);
+    t.className = `tile panel-${p.type} ${sz}`;
+    if (Number.isInteger(p.x) && Number.isInteger(p.y)) {   // 管理台拖出来的显式坐标
+      t.style.gridColumn = `${p.x + 1} / span ${Math.max(1, Math.min(4 - p.x, p.w || 1))}`;
+      t.style.gridRow = `${p.y + 1} / span ${Math.max(1, Math.min(4 - p.y, p.h || 1))}`;
+    } else {
+      t.style.gridColumn = `span ${Math.min(4, p.w || 1)}`;
+      t.style.gridRow = `span ${Math.min(4, p.h || 1)}`;
+    }
+    const inner = (W.RENDER[p.type] || (() => `<div class="label">未知面板 ${esc(p.type)}</div>`))(p, sz);
+    const scale = (typeof p.scale === 'number' && p.scale > 0) ? p.scale : 1;   // 面板整体缩放
+    t.innerHTML = scale === 1 ? inner : `<div class="tile-content" style="zoom:${scale}">${inner}</div>`;
+    W.applyFieldLayout(t, p);   // 字段级大小/对齐/位置
+    grid.appendChild(t);
+  }
+  // 每个 pet 面板挂一个踢足球 Lottie
+  document.querySelectorAll('[data-p="soccer"]').forEach(el => {
+    lotties.push(lottie.loadAnimation({ container: el, renderer: 'svg', loop: true, autoplay: false, path: '/clawd-soccer.json' }));
+  });
+  // 页码点
+  const dots = $('dots');
+  dots.innerHTML = (CFG.pages || []).map((_, i) => `<i class="${i === curPage ? 'on' : ''}"></i>`).join('');
+  dots.style.display = (CFG.pages || []).length > 1 ? 'flex' : 'none';
+  W.updateClock(document, CFG);
+  applyTheme();
+  // 立刻用缓存数据填充, 不等下一拍
+  if (LAST.stats) W.updateStats(document, LAST.stats);
+  if (LAST.claude) W.updateUsage(document, LAST.claude);
+  if (LAST.extras) W.updateExtras(document, LAST.extras);
+}
+
+function applyTheme() {
+  const a = CFG && CFG.theme && CFG.theme.accent;
+  if (a && /^#[0-9a-fA-F]{6}$/.test(a)) document.documentElement.style.setProperty('--accent', a);
+}
+
+async function loadConfig() {
+  const r = await (await fetch('/api/config')).json();
+  CFG = r.config; curRev = r.rev;
+}
+
+const LAST = { stats: null, claude: null, extras: null };
+
+/* ---------- 数据轮询 ---------- */
+async function pollStats() {
+  try {
+    const s = await (await fetch('/api/stats')).json();
+    if (s.cfgRev !== curRev) { await loadConfig(); curPage = s.pageIdx; renderPage(); }
+    else if (s.pageIdx !== curPage) { curPage = s.pageIdx; renderPage(); showPageToast(); }
+    LAST.stats = s;
+    W.updateStats(document, s);
+  } catch { /* 服务端重启间隙 */ }
+}
+
+async function pollExtras() {
+  try {
+    const x = await (await fetch('/api/extras')).json();
+    LAST.extras = x;
+    W.updateExtras(document, x);
+    checkNotifyBanner(x.notify);
+  } catch { /* ignore */ }
+}
+
+/* ---------- Claude 桌宠 + 额度 ---------- */
+const TOOL_LABEL = {
+  Bash: '跑命令', PowerShell: '跑命令', Read: '读文件', Glob: '搜索文件', Grep: '搜索代码',
+  Edit: '改代码', Write: '写文件', NotebookEdit: '改笔记本', WebFetch: '查资料', WebSearch: '搜网页',
+  Task: '跑子任务', Agent: '跑子任务', TodoWrite: '整理任务', Skill: '调用技能',
+};
+const toolLabel = t => (t ? (TOOL_LABEL[t] || ('用 ' + t)) : '干活');
+
+const CONFETTI = ['#d97757', '#3987e5', '#0ca30c', '#fab219', '#ffffff'];
+function burstConfetti(host, n) {
+  for (let i = 0; i < n; i++) {
+    const el = document.createElement('i');
+    el.className = 'confetti';
+    const x = 10 + Math.random() * 80, delay = Math.random() * 0.5;
+    const dur = 1.5 + Math.random() * 1.1, drift = (Math.random() - 0.5) * 220;
+    el.style.cssText = `left:${x}%; top:-14px; background:${CONFETTI[i % CONFETTI.length]};` +
+      `animation: fall ${dur}s cubic-bezier(.25,.6,.4,1) ${delay}s forwards; --drift:${drift}px;`;
+    host.appendChild(el);
+    setTimeout(() => el.remove(), (dur + delay) * 1000 + 100);
+  }
+}
+(function () {
+  const s = document.createElement('style');
+  s.textContent = '@keyframes fall { 0% { opacity:0; transform: translate(0,0) rotate(0deg); } 10% { opacity:1; } 100% { opacity:0; transform: translate(var(--drift), 680px) rotate(540deg); } }';
+  document.head.appendChild(s);
+})();
+
+// 全屏提醒: 由服务端锁存, 一直显示到按亮度键/热键确认才消除(不自动消失)
+let confettiTs = 0;
+function applyAlert(al, tool, notice) {
+  const active = al && al.active;
+  const type = active ? al.type : null;
+  $('alertFx').classList.toggle('on', type === 'permission');
+  $('doneFx').classList.toggle('on', type === 'done');
+  if (type === 'permission') $('alertSub').textContent = tool ? ('工具: ' + tool) : (notice || '按一下副屏按钮确认');
+  if (type === 'done' && al.ts !== confettiTs) { confettiTs = al.ts; burstConfetti($('doneFx'), 44); }
+  if (type !== 'done') confettiTs = active ? confettiTs : 0;
+}
+
+let soccerBusy = false;
+function setBusy(busy) {
+  document.querySelectorAll('[data-p="pet"]').forEach(el => el.classList.toggle('busy', busy));
+  if (busy === soccerBusy) return;
+  soccerBusy = busy;
+  lotties.forEach(l => { try { busy ? l.play() : l.stop(); } catch {} });
+}
+
+async function pollClaude() {
+  try {
+    const c = await (await fetch('/api/claude')).json();
+    LAST.claude = c;
+    const a = c.activity || {};
+    let st = a.state || 'sleeping';
+    if (DEMO) st = DEMO;
+
+    const busy = (st === 'tool' || st === 'thinking' || st === 'done');
+    document.querySelectorAll('[data-p="pet"]').forEach(el => { el.className = 'pet ' + st + (busy ? ' busy' : ''); });
+    document.querySelectorAll('.panel-pet').forEach(el => el.classList.toggle('asleep', st === 'sleeping'));
+    setBusy(busy);
+    const al = DEMO ? ((DEMO === 'permission' || DEMO === 'done') ? { active: true, type: DEMO, ts: 1 } : { active: false })
+                    : c.alert;
+    applyAlert(al, a.tool, a.notice);
+
+    const min = a.lastActiveMs ? Math.round((Date.now() - a.lastActiveMs) / 60000) : null;
+    const ago = min == null ? '未知' : min < 1 ? '刚刚' : min >= 60 ? Math.round(min / 60) + ' 小时前' : min + ' 分钟前';
+    const dev = a.device && a.device !== 'PC' ? a.device : 'Claude Code';
+    const sess = dev + ' · ' + (a.activeSessions || 1) + ' 个会话活跃';
+    const dots = ' <span class="dots"><span>·</span><span>·</span><span>·</span></span>';
+    document.querySelectorAll('[data-p="petStatus"]').forEach(el => {
+      el.classList.toggle('alert', st === 'permission');
+      if (st === 'permission')    el.textContent = '等你授权';
+      else if (st === 'tool')     el.innerHTML = 'Clawd 正在' + toolLabel(a.tool) + dots;
+      else if (st === 'thinking') el.innerHTML = 'Clawd 思考中' + dots;
+      else if (st === 'done')     el.textContent = 'Clawd 干完了';
+      else if (st === 'idle')     el.textContent = 'Clawd 待机中';
+      else                        el.textContent = 'Clawd 睡着了';
+    });
+    document.querySelectorAll('[data-p="petSub"]').forEach(el => {
+      el.textContent = (st === 'tool' || st === 'thinking' || st === 'done' || st === 'permission')
+        ? (st === 'permission' && a.tool ? '工具: ' + a.tool : sess)
+        : dev + ' · 最近活动 ' + ago;
+    });
+
+    W.updateUsage(document, c);
+  } catch { /* ignore */ }
+}
+
+// 歌词: 每秒拉一次当前播放 + 当前歌词行
+async function pollNowPlaying() {
+  if (!document.querySelector('[data-p="npLine"]')) return;
+  try {
+    const n = await (await fetch('/api/nowplaying')).json();
+    W.updateNowPlaying(document, n);
+  } catch { /* ignore */ }
+}
+
+// 轻量翻页检测: 只看 pageIdx/cfgRev, 变了才重画 —— 让亮度键翻页跟手(<0.5s)
+async function pollPage() {
+  try {
+    const s = await (await fetch('/api/stats')).json();
+    if (s.cfgRev !== curRev) { await loadConfig(); curPage = s.pageIdx; renderPage(); }
+    else if (s.pageIdx !== curPage) { curPage = s.pageIdx; renderPage(); showPageToast(); }
+  } catch { /* ignore */ }
+}
+
+// 切页时短暂显示页名, 之后淡出(配置 pageToast.enabled 可关)
+function showPageToast() {
+  if (CFG.pageToast && CFG.pageToast.enabled === false) return;
+  const el = $('pageToast');
+  el.querySelector('.pt-name').textContent = (CFG.pages[curPage] && CFG.pages[curPage].name) || ('第 ' + (curPage + 1) + ' 页');
+  el.querySelector('.pt-idx').textContent = (curPage + 1) + ' / ' + (CFG.pages || []).length;
+  el.classList.remove('show'); void el.offsetWidth;   // 重启动画
+  el.classList.add('show');
+}
+
+/* ---------- 手机通知横幅 ---------- */
+let nbLastId = -1;           // -1 = 尚未初始化(首拍不回放旧通知)
+const nbQueue = [];
+let nbBusy = false;
+function checkNotifyBanner(nf) {
+  if (!nf || !nf.recent) return;
+  const maxId = nf.recent.reduce((m, i) => Math.max(m, i.id || 0), 0);
+  if (nbLastId === -1) { nbLastId = maxId; return; }
+  if (maxId > nbLastId) {
+    nf.recent.filter(i => (i.id || 0) > nbLastId).reverse().forEach(i => nbQueue.push(i));
+    nbLastId = maxId;
+    if (!nbBusy) nextBanner();
+  }
+}
+function nextBanner() {
+  const it = nbQueue.shift();
+  if (!it) { nbBusy = false; return; }
+  nbBusy = true;
+  $('nbT').textContent = it.app + (it.title ? ' · ' + it.title : '');
+  $('nbB').textContent = it.body || '';
+  $('nbB').style.display = it.body ? '' : 'none';
+  const el = $('ntfBanner');
+  el.classList.add('on');
+  setTimeout(() => { el.classList.remove('on'); setTimeout(nextBanner, 420); }, 6500);
+}
+
+(async () => {
+  await loadConfig();
+  curPage = 0;
+  renderPage();
+  pollStats(); pollClaude(); pollExtras();
+  setInterval(pollStats, 2000);
+  setInterval(pollClaude, 2000);
+  setInterval(pollExtras, 1000);
+  setInterval(pollPage, 400);
+  setInterval(pollNowPlaying, 1000);
+  setInterval(() => W.updateClock(document, CFG), 1000);
+})();
+</script>
+</body>
+</html>

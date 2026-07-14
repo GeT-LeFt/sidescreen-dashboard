@@ -1,0 +1,40 @@
+{
+  "_说明": "把下面的 hooks 这一块，整段粘进 C:\\Users\\ASUS\\.claude\\settings.json 的顶层对象里（和 statusLine / theme 平级）。粘完重启 Claude Code 会话生效。",
+  "_为什么安全": [
+    "async:true —— 异步执行，不给每次工具调用增加延迟",
+    "hook.js 永远 exit 0 —— exit 2 才会阻塞工具调用，它不会",
+    "脚本只做一件事：把事件名写进 ~/.claude/sidescreen-activity.json，不读你任何内容、不联网",
+    "坏 JSON / 空输入 都会被静默忽略，不影响 Claude Code",
+    "不想要了：删掉 hooks 这一块即可，仪表盘会自动回退到扫 JSONL 的旧模式"
+  ],
+
+  "hooks": {
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "async": true, "timeout": 10, "command": "\"C:\\Program Files\\nodejs\\node.exe\" \"D:\\mywork\\sidescreen-dashboard\\hook.js\"" }] }
+    ],
+    "PreToolUse": [
+      { "matcher": ".*", "hooks": [{ "type": "command", "async": true, "timeout": 10, "command": "\"C:\\Program Files\\nodejs\\node.exe\" \"D:\\mywork\\sidescreen-dashboard\\hook.js\"" }] }
+    ],
+    "PostToolUse": [
+      { "matcher": ".*", "hooks": [{ "type": "command", "async": true, "timeout": 10, "command": "\"C:\\Program Files\\nodejs\\node.exe\" \"D:\\mywork\\sidescreen-dashboard\\hook.js\"" }] }
+    ],
+    "PermissionRequest": [
+      { "matcher": ".*", "hooks": [{ "type": "command", "async": true, "timeout": 10, "command": "\"C:\\Program Files\\nodejs\\node.exe\" \"D:\\mywork\\sidescreen-dashboard\\hook.js\"" }] }
+    ],
+    "Notification": [
+      { "hooks": [{ "type": "command", "async": true, "timeout": 10, "command": "\"C:\\Program Files\\nodejs\\node.exe\" \"D:\\mywork\\sidescreen-dashboard\\hook.js\"" }] }
+    ],
+    "SubagentStart": [
+      { "hooks": [{ "type": "command", "async": true, "timeout": 10, "command": "\"C:\\Program Files\\nodejs\\node.exe\" \"D:\\mywork\\sidescreen-dashboard\\hook.js\"" }] }
+    ],
+    "SubagentStop": [
+      { "hooks": [{ "type": "command", "async": true, "timeout": 10, "command": "\"C:\\Program Files\\nodejs\\node.exe\" \"D:\\mywork\\sidescreen-dashboard\\hook.js\"" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "async": true, "timeout": 10, "command": "\"C:\\Program Files\\nodejs\\node.exe\" \"D:\\mywork\\sidescreen-dashboard\\hook.js\"" }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [{ "type": "command", "async": true, "timeout": 10, "command": "\"C:\\Program Files\\nodejs\\node.exe\" \"D:\\mywork\\sidescreen-dashboard\\hook.js\"" }] }
+    ]
+  }
+}

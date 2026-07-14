@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>宽屏仪表盘</title>
+<link rel="stylesheet" href="/wide.css">
+</head>
+<body>
+
+<div id="track">
+  <!-- ⓪ Claude 会话页(从看板往下拉进入) -->
+  <section class="page" id="page-claude">
+    <div class="body" id="claudeBody">
+      <div id="csRail">
+        <div id="csStats">
+          <div class="cs-num"><b id="csTotal">0</b><span>活跃会话</span></div>
+          <div class="cs-num run"><b id="csRunning">0</b><span>运行中</span></div>
+          <div class="cs-num wait" id="csWaitWrap"><b id="csWaiting">0</b><span>等你操作</span></div>
+        </div>
+        <div id="csMsg">—</div>
+        <div class="card" id="csUsage">
+          <div class="t">CLAUDE CODE 用量<span class="hint">点开详情</span></div>
+          <div class="ubar"><div class="label-row"><span>会话</span><b id="csSessPct">--%</b></div><div class="hbar"><i id="csSessBar"></i></div></div>
+          <div class="ubar"><div class="label-row"><span>周额度</span><b id="csWeekPct">--%</b></div><div class="hbar"><i id="csWeekBar"></i></div></div>
+          <div class="ubar"><div class="label-row"><span id="csScLabel">Opus</span><b id="csScPct">--%</b></div><div class="hbar"><i id="csScBar"></i></div></div>
+          <div id="csUsageMeta">—</div>
+        </div>
+      </div>
+      <div class="cs-col" id="csRunCol">
+        <div class="col-hd run">运行中 <b id="csRunN">0</b></div>
+        <div class="col-body" id="csRunBody"><div class="empty">无运行中会话</div></div>
+      </div>
+      <div class="cs-col" id="csDoneCol">
+        <div class="col-hd done">已完成 <b id="csDoneN">0</b></div>
+        <div class="col-body" id="csDoneBody"><div class="empty">无已完成会话</div></div>
+      </div>
+    </div>
+    <div class="dock" id="dock-claude">
+      <span class="pgname">CLAUDE</span>
+      <span id="csDockHint">最近 30 分钟活跃的 Claude Code 会话 · 数据来自本机 hooks</span>
+      <div style="flex:1"></div>
+      <div class="dock-btn press-btn" id="csUsageBtn"><svg viewBox="0 0 24 24"><path d="M4 19V5M4 19h16M8 15v-4M12 15V8M16 15v-6"/></svg>额度详情</div>
+    </div>
+  </section>
+
+  <!-- ① 看板页 -->
+  <section class="page" id="page-board">
+    <div class="body">
+      <div id="perfGrid"></div>
+      <div id="focusCol">
+        <div class="card" id="clockCard">
+          <div id="clockTime">--:--<span class="sec">--</span></div>
+          <div id="clockDate"><b>星期—</b> · —月—日 · 农历—</div>
+          <svg id="mascot" viewBox="0 0 16 16"></svg>
+        </div>
+        <div class="card" id="usageCard">
+          <div id="usageRingWrap">
+            <svg viewBox="0 0 100 100" width="260" height="260">
+              <circle cx="50" cy="50" r="43" fill="none" stroke="#1c222d" stroke-width="10"></circle>
+              <circle id="usageRing" cx="50" cy="50" r="43" fill="none" stroke="var(--accent)" stroke-width="10"
+                      stroke-linecap="round" stroke-dasharray="0 270.2" transform="rotate(-90 50 50)"></circle>
+            </svg>
+            <div class="pct"><div class="v" id="usageSessPct">--%</div><div class="l">会话额度</div></div>
+          </div>
+          <div id="usageRight">
+            <div id="usageTitle">CLAUDE CODE 用量</div>
+            <div class="ubar"><div class="label-row"><span>周额度</span><b id="usageWeekPct">--%</b></div><div class="hbar"><i id="usageWeekBar"></i></div></div>
+            <div class="ubar"><div class="label-row"><span id="usageScopedLabel">Opus 额度</span><b id="usageScopedPct">--%</b></div><div class="hbar"><i id="usageScopedBar"></i></div></div>
+            <div id="usageMeta">—</div>
+            <div id="usageTok"></div>
+          </div>
+        </div>
+      </div>
+      <div id="mediaCol">
+        <div class="card" id="npCard">
+          <div id="npCover">♪</div>
+          <div id="npInfo">
+            <div id="npTitle">未在播放</div>
+            <div id="npArtist">—</div>
+            <div id="npProg"><div class="bar"><i id="npBar" style="width:0%"></i></div>
+              <div class="t"><span id="npPos">0:00</span><span id="npDur">0:00</span></div></div>
+          </div>
+        </div>
+        <div class="card lyr-wrap lyr-board" id="lyricsCard"><div class="lyr-empty">♪</div></div>
+        <div class="card" id="weatherStrip">
+          <span class="icon" id="wIcon">—</span>
+          <span class="now" id="wTemp">--°</span>
+          <span class="meta"><span class="d" id="wDesc">—</span><br><span id="wHiLo">--/--</span></span>
+          <div class="fc" id="wFc"></div>
+        </div>
+      </div>
+      <div id="dynCol">
+        <div class="card dyn-card" id="calCard"><h3>今日日程</h3><div id="calList"><div class="empty">未设置日历订阅</div></div></div>
+        <div class="card dyn-card" id="ntfCard"><h3>手机通知<span class="act" id="ntfClear">清除</span></h3><div id="ntfList"><div class="empty">暂无通知</div></div></div>
+        <div class="card dyn-card" id="healthCard">
+          <div id="healthDot"></div>
+          <div id="healthTx"><div class="a" id="healthName">服务器未配置</div><div class="b" id="healthMeta">—</div></div>
+        </div>
+      </div>
+    </div>
+    <div class="dock" id="dock-board">
+      <span class="pgname">仪表盘</span>
+      <div class="dock-btn press-btn" data-act="screenshot"><svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>截图</div>
+      <div class="dock-btn press-btn" data-act="micmute" id="btnMic"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>麦克风</div>
+      <div class="dock-btn press-btn" data-act="dnd" id="btnDnd"><svg viewBox="0 0 24 24"><path d="M20 13A8 8 0 1 1 11 4a6.5 6.5 0 0 0 9 9z"/></svg>勿扰</div>
+      <div class="dock-btn press-btn" data-act="awake" id="btnAwake"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.5 4.5l2 2M17.5 17.5l2 2M19.5 4.5l-2 2M6.5 17.5l-2 2"/></svg>防息屏</div>
+      <div class="dock-btn press-btn" data-act="note"><svg viewBox="0 0 24 24"><path d="M5 4h14v13l-4 3H5z"/><path d="M8 9h8M8 13h5"/></svg>便签</div>
+      <div class="dock-btn press-btn" data-act="pomo" id="btnPomo"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2M9 2h6"/></svg><span id="pomoLb">番茄钟</span></div>
+      <div class="dock-slider">
+        <div class="vol-mute press-sm" data-vmute><svg viewBox="0 0 24 24"><path d="M4 10v4h4l5 4V6l-5 4H4z"/><path class="wave" d="M16 9a4 4 0 0 1 0 6"/><line class="slash" x1="21" y1="7" x2="15" y2="17"/></svg></div>
+        <div class="rail" data-slider="volume"><i style="width:50%"></i><div class="knob" style="left:50%"></div></div>
+        <span class="val" id="volVal">--</span>
+      </div>
+      <div class="dock-slider">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.5 1.5M16.9 16.9l1.5 1.5M18.4 5.6l-1.5 1.5M7.1 16.9l-1.5 1.5"/></svg>
+        <div class="rail" data-slider="bright"><i style="width:80%"></i><div class="knob" style="left:80%"></div></div>
+        <span class="val" id="briVal">80</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ② 操控台页 -->
+  <section class="page" id="page-ctrl">
+    <div class="body">
+      <div class="card" id="ctrlClock">
+        <div class="t" id="cTime">--:--</div>
+        <div class="d" id="cDate">—</div>
+        <div id="ctrlChips">
+          <div class="cchip"><span class="k">GPU</span><span class="v" id="cGpu">--</span></div>
+          <div class="cchip"><span class="k">CPU</span><span class="v" id="cCpu">--</span></div>
+          <div class="cchip"><span class="k">内存</span><span class="v" id="cRam">--</span></div>
+          <div class="cchip"><span class="k">正在播放</span><span class="v" id="cNp" style="font-family:'Noto Sans SC';font-size:28px">—</span></div>
+        </div>
+      </div>
+      <div id="ctrlRight">
+        <div class="card sect">
+          <h2>应用启动<span class="hint">Steam:短按打开 · 长按更多</span></h2>
+          <div id="appGrid"></div>
+        </div>
+        <div class="card sect" id="sndTile">
+          <h2>声音<span class="hint">点空白处打开完整控制</span></h2>
+          <div id="sndRow">
+            <div class="mute-btn press-sm" id="sndMuteBtn"><svg viewBox="0 0 24 24"><path d="M4 10v4h4l5 4V6l-5 4H4z"/><path d="M16 9a4 4 0 0 1 0 6"/></svg></div>
+            <div class="rail" data-slider="volume2"><i style="width:50%"></i><div class="knob" style="left:50%"></div></div>
+            <span class="val" id="volVal2">--</span>
+          </div>
+          <div id="sndApps"></div>
+        </div>
+      </div>
+    </div>
+    <div class="dock" id="dock-ctrl">
+      <span class="pgname">操控台</span>
+      <div class="dock-btn press-btn" data-act="net"><svg viewBox="0 0 24 24"><path d="M2 9a15 15 0 0 1 20 0M5.5 12.5a10 10 0 0 1 13 0M9 16a5 5 0 0 1 6 0"/><circle cx="12" cy="19.5" r="1.3"/></svg>网络</div>
+      <div class="dock-btn press-btn" data-act="bt"><svg viewBox="0 0 24 24"><path d="M7 7l10 10-5 4V3l5 4L7 17"/></svg>蓝牙</div>
+      <div class="dock-btn press-btn" data-act="captions"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="M10 12a2 2 0 1 0 0 .01M17 12a2 2 0 1 0 0 .01" fill="none"/></svg>实时字幕</div>
+      <div class="dock-btn press-btn" data-act="copilot"><svg viewBox="0 0 24 24"><path d="M6 9h4M8 7v4M15 8.5h.01M17.5 11h.01"/><path d="M7 6h10a4 4 0 0 1 4 4v3a4 4 0 0 1-4 4H7a4 4 0 0 1-4-4v-3a4 4 0 0 1 4-4z"/></svg>游戏副驾驶</div>
+      <div style="flex:1"></div>
+      <div class="dock-btn danger" data-power="lock"><svg viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>锁屏<div class="holdbar"><i></i></div></div>
+      <div class="dock-btn danger" data-power="sleep"><svg viewBox="0 0 24 24"><path d="M20 13A8 8 0 1 1 11 4a6.5 6.5 0 0 0 9 9z"/></svg>睡眠<div class="holdbar"><i></i></div></div>
+      <div class="dock-btn danger" data-power="restart"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-3-6.2"/><path d="M20 4v5h-5"/></svg>重启<div class="holdbar"><i></i></div></div>
+      <div class="dock-btn danger" data-power="shutdown"><svg viewBox="0 0 24 24"><path d="M12 3v8"/><path d="M6.3 6.3a8 8 0 1 0 11.4 0"/></svg>关机<div class="holdbar"><i></i></div></div>
+    </div>
+  </section>
+
+  <!-- ③ 沉浸媒体页 -->
+  <section class="page" id="page-media">
+    <div class="body">
+      <div id="mCoverWrap">
+        <div id="mCover">♪</div>
+        <div><div id="mTitle">未在播放</div><div id="mArtist">—</div></div>
+      </div>
+      <div id="mLyrics" class="lyr-wrap lyr-media"><div class="lyr-empty">♪</div></div>
+      <div id="mRight">
+        <div class="card" id="mQueue"><h3>播放队列</h3><div class="empty">播放器未提供队列<br>(SMTC 限制)</div></div>
+        <div class="card" id="mWeather" style="display:flex;align-items:center;gap:22px;padding:0 30px">
+          <span class="icon" id="mwIcon" style="font-size:48px">—</span>
+          <span class="now mono" id="mwTemp" style="font-size:46px;font-weight:800">--°</span>
+          <span style="font-size:26px;color:#8A96A6" id="mwDesc">—</span>
+        </div>
+      </div>
+    </div>
+    <div class="dock" id="dock-media">
+      <span class="pgname">媒体</span>
+      <div class="dock-btn mbtn press-btn" data-media="prev"><svg viewBox="0 0 24 24"><path d="M18 5v14L8 12zM6 5v14"/></svg></div>
+      <div class="dock-btn mbtn play press-btn" data-media="playpause"><svg id="playIcon" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></svg></div>
+      <div class="dock-btn mbtn press-btn" data-media="next"><svg viewBox="0 0 24 24"><path d="M6 5v14l10-7zM18 5v14"/></svg></div>
+      <div class="dock-slider prog">
+        <div class="rail"><i id="mProgBar" style="width:0%"></i><div class="knob" id="mProgKnob" style="left:0%"></div></div>
+        <span class="val mono" id="mProgT">0:00</span>
+      </div>
+      <div class="dock-slider" style="flex:.7">
+        <div class="vol-mute press-sm" data-vmute><svg viewBox="0 0 24 24"><path d="M4 10v4h4l5 4V6l-5 4H4z"/><path class="wave" d="M16 9a4 4 0 0 1 0 6"/><line class="slash" x1="21" y1="7" x2="15" y2="17"/></svg></div>
+        <div class="rail" data-slider="volume3"><i style="width:50%"></i><div class="knob" style="left:50%"></div></div>
+        <span class="val" id="volVal3">--</span>
+      </div>
+      <div class="dock-btn press-btn" data-act="output" id="btnOutput"><svg viewBox="0 0 24 24"><path d="M4 14a8 8 0 0 1 16 0"/><rect x="2.5" y="14" width="4.5" height="6" rx="2"/><rect x="17" y="14" width="4.5" height="6" rx="2"/></svg><span id="outputLb">输出</span></div>
+    </div>
+  </section>
+</div>
+
+<!-- ④ 游戏副驾驶(覆盖层) -->
+<section id="page-game">
+  <div id="gameHead">
+    <div id="gameIcon">🎮</div>
+    <div><div id="gameName">—</div><div id="gameMeta">检测到游戏进程 · 勿扰已自动开启</div></div>
+    <div id="gameExit" class="press-btn">退出副驾驶</div>
+  </div>
+  <div class="gbody">
+    <div class="card" id="fpsCard">
+      <div class="l">帧率</div>
+      <div id="fpsBig">--<span class="u">FPS</span></div>
+      <div id="fpsSub"><span>1% Low <b id="fpsLow">--</b></span><span>平均帧时间 <b id="fpsMs">--ms</b></span></div>
+      <svg class="spark" id="fpsSpark" viewBox="0 0 100 30" preserveAspectRatio="none"></svg>
+    </div>
+    <div id="gameGrid">
+      <div class="card gtile"><div class="l">GPU 利用率</div><div class="v" id="gGpu">--<span class="unit">%</span></div><div class="s"><b id="gGpuClk">--</b> GHz 核心频率</div><svg class="spark" data-gspark="gpuUtil" viewBox="0 0 100 30" preserveAspectRatio="none"></svg></div>
+      <div class="card gtile"><div class="l">GPU 温度</div><div class="v" id="gGpuT">--<span class="unit">°C</span></div><div class="s">功耗 <b id="gGpuP">--</b> W</div><svg class="spark" data-gspark="gpuTemp" viewBox="0 0 100 30" preserveAspectRatio="none"></svg></div>
+      <div class="card gtile"><div class="l">CPU</div><div class="v" id="gCpu">--<span class="unit">%</span></div><div class="s"><b id="gCpuClk">--</b> GHz</div><svg class="spark" data-gspark="cpuUtil" viewBox="0 0 100 30" preserveAspectRatio="none"></svg></div>
+      <div class="card gtile"><div class="l">显存</div><div class="v" id="gVram">--<span class="unit">GB</span></div><div class="s">占用 <b id="gVramP">--</b>%</div><svg class="spark" data-gspark="vram" viewBox="0 0 100 30" preserveAspectRatio="none"></svg></div>
+      <div class="card gtile"><div class="l">网络延迟</div><div class="v" id="gPing">--<span class="unit">ms</span></div><div class="s">下行 <b id="gRx">--</b> MB/s</div><svg class="spark" data-gspark="ping" viewBox="0 0 100 30" preserveAspectRatio="none"></svg></div>
+      <div class="card gtile"><div class="l">时钟</div><div class="v" id="gClock" style="font-size:76px">--:--</div><div class="s" id="gRun">本次已运行 —</div></div>
+    </div>
+    <div id="gameSide">
+      <div class="card" id="gameNtfCard"><h3 style="font-size:26px;color:#718092;margin-bottom:12px">通知</h3><div id="gameNtfList"><div class="empty">勿扰中</div></div></div>
+      <div id="gameDnd">勿扰中 · 其余手机通知已静音, 退出游戏后恢复</div>
+      <div id="gameActs">
+        <div class="dock-btn press-btn" data-act="micmute"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg>麦克风静音</div>
+        <div class="dock-btn press-btn" data-act="screenshot"><svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>截图</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- 边缘热区 -->
+<div class="edge left"><div class="glow"></div><div class="handle"></div></div>
+<div class="edge right"><div class="glow"></div><div class="handle"></div></div>
+
+<!-- 弹层母版 -->
+<div id="ovlMask">
+  <div id="ovl">
+    <div id="ovlHead"><span id="ovlTitle">—</span><span id="ovlSub"></span><div id="ovlClose" class="press-sm">✕</div></div>
+    <div id="ovlBody"></div>
+  </div>
+</div>
+
+<div id="toast"></div>
+<div id="pageToast"></div>
+
+<script src="/lunar.js"></script>
+<script src="/wide.js"></script>
+</body>
+</html>
