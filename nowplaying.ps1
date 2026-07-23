@@ -36,10 +36,16 @@ function JsonEsc($s) {
   return ($s -replace '\\', '\\' -replace '"', '\"' -replace "`r", '' -replace "`n", ' ' -replace "`t", ' ')
 }
 
+# SMTC session manager: create ONCE and reuse across the loop. The old code called
+# RequestAsync() every second, which rebuilt the manager and pinned BOTH this script
+# and the NPSMSvc system service near 100% of a core. Reuse GetCurrentSession() instead.
+$mgr = $null
+try { $mgr = Await ($mgrType::RequestAsync()) $mgrType } catch {}
+
 while ($true) {
   $out = '{"playing":false}'
   try {
-    $mgr = Await ($mgrType::RequestAsync()) $mgrType
+    if ($null -eq $mgr) { $mgr = Await ($mgrType::RequestAsync()) $mgrType }
     $session = $mgr.GetCurrentSession()
     if ($session) {
       $media = Await ($session.TryGetMediaPropertiesAsync()) $propType

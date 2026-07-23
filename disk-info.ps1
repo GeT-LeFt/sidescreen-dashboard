@@ -21,47 +21,12 @@ try {
 
 # ---- temps (best effort, empty array if unavailable) ----
 $temps = @()
-try {
-  $pds = @(Get-PhysicalDisk -ErrorAction Stop)
-  foreach ($pd in $pds) {
-    try {
-      $rc = $pd | Get-StorageReliabilityCounter -ErrorAction Stop
-      if ($rc -and $null -ne $rc.Temperature -and [int]$rc.Temperature -gt 0) {
-        $temps += [pscustomobject]@{
-          name = [string]$pd.FriendlyName
-          c    = [int]$rc.Temperature
-        }
-      }
-    } catch { }
-  }
-} catch { }
-
-if ($temps.Count -eq 0) {
-  # Fallback: SMART thermal data via root/wmi (usually admin-only; swallow all errors).
-  try {
-    $thermals = @(Get-CimInstance -Namespace root/wmi -ClassName MSStorageDriver_FailurePredictThresholds -ErrorAction Stop)
-    if ($thermals.Count -gt 0) {
-      $smart = @(Get-CimInstance -Namespace root/wmi -ClassName MSStorageDriver_FailurePredictData -ErrorAction Stop)
-      foreach ($s in $smart) {
-        try {
-          $v = $s.VendorSpecific
-          # SMART attribute table starts at byte 2, 12 bytes per entry: [id][flags2][value][worst][raw5...]
-          for ($i = 2; $i -lt ($v.Length - 12); $i += 12) {
-            $id = $v[$i]
-            if ($id -eq 194 -or $id -eq 190) {
-              $c = [int]$v[$i + 5]   # first raw byte = temperature in C
-              if ($c -gt 0 -and $c -lt 100) {
-                $nm = [string]$s.InstanceName
-                $temps += [pscustomobject]@{ name = $nm; c = $c }
-              }
-              break
-            }
-          }
-        } catch { }
-      }
-    }
-  } catch { }
-}
+# Disk-temperature collection DISABLED on this machine. Get-StorageReliabilityCounter
+# returns Access-Denied (needs admin) and MSStorageDriver_* is Not-Supported on these
+# NVMe drives, so 'temps' was ALWAYS empty -- yet every 60s run spawned a ~2s PowerShell
+# and produced ~89% of all WMI-Activity failures. Kept 'drives' (Win32_LogicalDisk) only.
+# To restore temps later: run the dashboard elevated, or switch to an NVMe/StorageWMI
+# reliability class that works here; the original block is in git history.
 
 # ---- emit single-line JSON ----
 $out = '{"drives":[],"temps":[]}'

@@ -14,8 +14,6 @@ const PORT = 3777;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
 const CRED_FILE = path.join(os.homedir(), '.claude', '.credentials.json');
-const OAUTH_CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e';
-const CLAUDE_UA = 'claude-code/2.1.206';   // 缺 UA 会进限流桶
 // 该地区直连 Anthropic 被拦, 必须走本地代理(Clash Verge 等)。默认读环境变量, 回退 7897。
 const PROXY_URL = process.env.HTTPS_PROXY || process.env.https_proxy ||
                   process.env.HTTP_PROXY || process.env.http_proxy || 'http://127.0.0.1:7897';
@@ -469,11 +467,21 @@ function lastReplyFor(sid, cwd) {
     // ai-title 随对话不断重写, 取最后一条; custom-title 优先(桌面应用也这么显示)。
     let title = readTitle(file);
     if (!title && c && c.title) title = c.title;   // 万一没标题行 -> 沿用上次
-    let text = null;
+    let text = null, turn = null;
     for (let i = lines.length - 1; i >= 0 && !text; i--) {
       if (!lines[i] || lines[i][0] !== '{') continue;   // 首行可能被截断, parse 失败也无妨
       try {
         const j = JSON.parse(lines[i]);
+        /* 这一轮到底答完没 —— 以转录里"最后一条主线 user/assistant 记录"为准。
+           桌面应用不一定发 Stop 事件(实测会话答完了快照仍停在 thinking), 光靠 hook 判断不出来。
+             assistant 带 tool_use -> 正在跑工具;  assistant 纯文字 -> 这轮说完了;
+             user(含工具结果回填)  -> 轮到 Claude 干活。
+           子代理记录(isSidechain)跳过: 子任务先答完不代表主线答完。 */
+        if (turn === null && !j.isSidechain && (j.type === 'user' || j.type === 'assistant')) {
+          const arr = j.message && Array.isArray(j.message.content) ? j.message.content : null;
+          turn = j.type === 'user' ? 'working'
+               : (arr && arr.some(it => it && it.type === 'tool_use')) ? 'working' : 'done';
+        }
         if (j.type === 'assistant' && j.message && Array.isArray(j.message.content)) {
           for (let k = j.message.content.length - 1; k >= 0; k--) {
             const it = j.message.content[k];
@@ -486,7 +494,7 @@ function lastReplyFor(sid, cwd) {
       } catch { /* 半截行 */ }
     }
     if (!text && c && c.text) text = c.text;   // 尾窗里暂时没有文字回复 -> 沿用上一次找到的
-    const info = { mtime: st.mtimeMs, size: st.size, text, title };
+    const info = { mtime: st.mtimeMs, size: st.size, text, title, turn };
     sessReplyCache.set(sid, info);
     return info;
   } catch { return null; }
@@ -529,12 +537,19 @@ function getClaudeSessions(debug) {
     const d = c.data;
     if (!d || !d.ts || d.state === 'ended') continue;
     const age = now - d.ts;
-    // 无心跳, 按事件年龄近似: tool 给 10 分钟(长命令), thinking 给 3 分钟, 超窗视为搁置(done)
-    let status = 'done';
+    const info = lastReplyFor(sid, d.cwd);
+    /* 状态判定, 按可信度排:
+       ① permission —— 只有 hook 知道"正在等你点", 转录里看不出来, 最优先;
+       ② 转录实况(info.turn) —— 答完没以转录最后一条主线记录为准。桌面应用不一定发 Stop,
+          光看 hook 会让答完的会话一直挂"运行中", 直到 3 分钟超时才翻 —— 状态是秒表翻的不是事实翻的;
+       ③ 转录读不到(刚开会话/尾窗全是大工具输出)才退回原来的年龄近似: tool 10 分钟、thinking 3 分钟。*/
+    let status;
     if (d.state === 'permission') status = 'waiting';
+    else if (info && info.turn) status = info.turn === 'working' ? 'running' : 'done';
+    else if (d.state === 'done' || d.state === 'idle') status = 'done';
     else if (d.state === 'tool' && age < 10 * 60 * 1000) status = 'running';
     else if (d.state === 'thinking' && age < 3 * 60 * 1000) status = 'running';
-    const info = lastReplyFor(sid, d.cwd);
+    else status = 'done';
     raw.push({
       sid: sid.slice(0, 8), fullSid: sid, cwd: d.cwd || '',
       proj: d.cwd ? String(d.cwd).replace(/[\\/]+$/, '').split(/[\\/]/).pop() : '未知项目',
@@ -570,8 +585,8 @@ function getClaudeSessions(debug) {
 }
 
 // ---------------- Claude 官方额度 (oauth/usage, 经本地代理) ----------------
-// 读 ~/.claude/.credentials.json 的令牌, 通过本地代理调官方接口, 拿全三条 + 跨设备。
-// 令牌快过期时用 refresh_token 刷新(单次轮换, 写回文件)。
+// 读 ~/.claude/.credentials.json 的令牌, 通过本地代理调官方接口(GET, 只读查用量), 拿全三条。
+// 【只读】不刷新、不写凭据、不伪装 UA。令牌过期就报状态、等你在终端 /login 把新令牌写回本文件。
 
 const usage = {
   data: null,        // { session, weekAll, weekScoped } 各含 {pct, resetsAt, severity, label?}
@@ -583,10 +598,6 @@ const usage = {
   expiredSince: 0,             // 令牌首次被发现过期的时刻(用于宽限期)
 };
 
-// 令牌过期后, 先给正在运行的 Claude Code 这么久去自动轮换; 超期未刷才由本副屏兜底自己刷。
-// 副屏与 CLI 共用同一份凭据, refresh_token 是一次性轮换, 抢着刷会互相搞失效并被官方 429 限流,
-// 所以正常情况下副屏「只读令牌」, 把刷新的活留给 CLI, 只在 CLI 明显不在时才自己刷。
-const TOKEN_GRACE_MS = 3 * 60 * 1000;
 
 // 通过 HTTP 代理的 CONNECT 隧道建 TLS 连接的 https.Agent (零依赖)
 function proxyAgent() {
@@ -616,8 +627,9 @@ function apiRequest(method, urlStr, headers, bodyObj) {
     const req = https.request({
       hostname: u.hostname, path: u.pathname + u.search, method,
       agent: proxyAgent(),
+      // 不再伪装成 claude-code 客户端: 实测 oauth/usage 只读查询不带 UA 也照样 200(用户要求, 2026-07-23)
       headers: Object.assign(
-        { 'Content-Type': 'application/json', 'User-Agent': CLAUDE_UA },
+        { 'Content-Type': 'application/json' },
         payload ? { 'Content-Length': Buffer.byteLength(payload) } : {},
         headers
       ),
@@ -638,67 +650,52 @@ function apiRequest(method, urlStr, headers, bodyObj) {
   });
 }
 
+// 凭据只读。writeCreds 已删 —— 副屏现在一个字节都不往 .credentials.json 里写。
 function readCreds() { return JSON.parse(fs.readFileSync(CRED_FILE, 'utf8').replace(/^﻿/, '')); }
-function writeCreds(o) {
-  const tmp = CRED_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(o, null, 2), 'utf8');
-  fs.renameSync(tmp, CRED_FILE);
-}
 
+/* 令牌大事记: 单独一个小日志, 不跟着重启被冲掉 —— 到底是谁在维护 .credentials.json
+   (桌面应用? 终端 CLI? 还是只有本服务?) 靠它攒出证据。只记时间和结果, 不记令牌内容。 */
+const TOKEN_LOG = path.join(__dirname, 'token-renew.log');
+function tokenLog(msg) {
+  const line = `[${new Date().toLocaleString()}] ${msg}\n`;
+  console.log('[token]', msg);
+  try {
+    fs.appendFileSync(TOKEN_LOG, line);
+    const st = fs.statSync(TOKEN_LOG);
+    if (st.size > 131072) { const b = fs.readFileSync(TOKEN_LOG); fs.writeFileSync(TOKEN_LOG, b.slice(b.length - 65536)); }
+  } catch { /* 记不上不影响主流程 */ }
+}
+/* 盯着凭据文件被谁改: 每 5 分钟看一次 mtime。副屏自己已经不写这个文件了, 所以它一变
+   就必定是外面(桌面应用 / 终端 CLI / 你手动 login)干的 —— 这正是"到底谁在维护这份凭据"的直接证据。
+   只看 mtime 和到期时间, 不碰令牌本身。 */
+let lastCredMtime = 0;
+function credWatchTick() {
+  let m = 0; try { m = fs.statSync(CRED_FILE).mtimeMs; } catch { return; }
+  if (!lastCredMtime) { lastCredMtime = m; return; }
+  if (m === lastCredMtime) return;
+  lastCredMtime = m;
+  let left = '?';
+  try { left = Math.round((readCreds().claudeAiOauth.expiresAt - Date.now()) / 60000) + ' 分钟'; } catch {}
+  tokenLog(`凭据被外部改写(桌面应用 / 终端 CLI / 手动 login), 新令牌还剩 ${left}`);
+}
+setInterval(credWatchTick, 5 * 60 * 1000);
+setTimeout(credWatchTick, 10 * 1000);
+
+/* 令牌: 只读, 不刷新、不写回。
+   删掉的两条路(2026-07-23, 用户拍板):
+   ① 自刷: 拿 refresh_token 打 platform.claude.com/v1/oauth/token, 还套 claude-code 的 User-Agent
+      —— 仿冒官方客户端, 已经因此吃过 429; 直接删。
+   ② 起终端 CLI 兜底(auth status / -p / auth login): 用户平时只用桌面应用, 不要副屏去拉起 CLI。
+   现在令牌过期就老老实实报错、等人工在终端 `claude` 里 /login(那一下会把新令牌写回本文件)。 */
 async function ensureToken() {
-  const creds = readCreds();   // 每次都重读文件: CLI 若刚刷新过, 这里直接拿到新令牌
-  const oa = creds.claudeAiOauth;
+  const oa = readCreds().claudeAiOauth;   // 每次都重读文件: 外面刚登录过, 这里直接拿到新令牌
   if (!oa) throw new Error('credentials.json 无 claudeAiOauth (需在终端 /login)');
   if (oa.expiresAt - Date.now() > 3 * 60 * 1000) { usage.expiredSince = 0; return oa.accessToken; }
-
-  // 令牌已过期/将过期。优先等正在运行的 Claude Code 自己轮换(它会写回同一文件), 我们不去抢刷。
   if (!usage.expiredSince) usage.expiredSince = Date.now();
-  if (Date.now() - usage.expiredSince < TOKEN_GRACE_MS) {
-    const e = new Error('令牌过期, 等 Claude Code 自动刷新'); e.soft = true; throw e;
-  }
-
-  // 宽限期内 CLI 仍未刷新(多半没在跑)-> 副屏兜底刷一次
-  const ok = await tryRefresh('过期兜底');
-  if (ok) { usage.expiredSince = 0; return readCreds().claudeAiOauth.accessToken; }
-  const e = new Error('令牌刷新 HTTP 429'); e.rateLimited = true; throw e;
+  const e = new Error('令牌已过期, 需在终端跑 claude 再 /login');
+  e.soft = true;   // 不进长退避: 每分钟重读文件, 你一登录副屏立刻自己恢复
+  throw e;
 }
-
-// 共用刷新: 拿 refresh_token 换新令牌并写回。成功 true / 失败(含 429 限流) false。
-let lastRefreshAt = 0;
-async function tryRefresh(reason) {
-  let creds; try { creds = readCreds(); } catch { return false; }
-  const oa = creds.claudeAiOauth;
-  if (!oa || !oa.refreshToken) return false;
-  lastRefreshAt = Date.now();
-  try {
-    const r = await apiRequest('POST', 'https://platform.claude.com/v1/oauth/token', {}, {
-      grant_type: 'refresh_token', refresh_token: oa.refreshToken, client_id: OAUTH_CLIENT_ID,
-    });
-    if (r.status === 200 && r.json && r.json.access_token) {
-      oa.accessToken = r.json.access_token;
-      if (r.json.refresh_token) oa.refreshToken = r.json.refresh_token;
-      oa.expiresAt = Date.now() + (r.json.expires_in || 3600) * 1000;
-      writeCreds(creds);
-      usage.expiredSince = 0; usage.error = null;
-      console.log('[usage] 令牌已刷新(' + reason + '), 到期', new Date(oa.expiresAt).toLocaleString());
-      return true;
-    }
-    console.log('[usage] 刷新失败(' + reason + ') HTTP', r.status, r.status === 429 ? '限流' : (r.text || '').slice(0, 100));
-    return false;
-  } catch (e) { console.log('[usage] 刷新异常(' + reason + '):', e.message); return false; }
-}
-
-// 主动提前续期: 429 是"账号被桌面应用占满"的临时限流, 单点尝试基本必败;
-// 改成令牌整段生命里反复找空窗刷 —— 剩 <100 分钟就每 20 分钟试一次(距上次 >18 分钟才真发请求)。
-// 成功一次即换到新的 8h 令牌+新 refresh_token, 循环续命; 期间当前令牌照常可用, 不影响显示。
-function proactiveTick() {
-  let oa; try { oa = readCreds().claudeAiOauth; } catch { return; }
-  if (!oa || !oa.refreshToken) return;
-  const leftMin = (oa.expiresAt - Date.now()) / 60000;
-  if (leftMin < 100 && Date.now() - lastRefreshAt > 18 * 60 * 1000) tryRefresh(leftMin > 0 ? '主动' : '过期重试');
-}
-setInterval(proactiveTick, 20 * 60 * 1000);
-setTimeout(proactiveTick, 30 * 1000);   // 启动后也评估一次
 
 // 从响应的 limits 数组取三条 (最干净的来源)
 function mapUsage(j) {
@@ -721,17 +718,55 @@ function fileTokenValid() {
 
 // ---------------- 额度历史落盘 (usage-history.jsonl) ----------------
 // 每次成功拉到额度就采一个点 {t, s:会话%, w:周%, o:Opus%}; 数值没变且间隔<5分钟就跳过。
-// 保留 30 天, 启动时加载, 攒多了重写文件裁剪。给详情弹层画走势用。
+// 【永久保留, 只留本机】实测约 185 点/天、40 字节/点 -> 2.6 MB/年, 十年也才 26 MB, 没有淘汰的必要。
+// 只追加、从不重写整表: 重写一旦中途崩/断电就等于把历史截断了, 追加没有这个风险。
+// 另做每日冷备(.bak), 且只在源不比备份小时才覆盖 —— 绝不用一个更小的文件盖掉好备份。
+// 文件已在 .gitignore 里, 不会跟着公开仓库出去。
 const USAGE_HIST_FILE = path.join(__dirname, 'usage-history.jsonl');
-const USAGE_HIST_KEEP_MS = 30 * 24 * 3600 * 1000;
+const USAGE_HIST_BAK = USAGE_HIST_FILE + '.bak';
 let usageHist = [];
 try {
-  const cut = Date.now() - USAGE_HIST_KEEP_MS;
   usageHist = fs.readFileSync(USAGE_HIST_FILE, 'utf8').split('\n').filter(Boolean)
     .map(l => { try { return JSON.parse(l); } catch { return null; } })
-    .filter(p => p && p.t > cut);
-  console.log('[usage] 历史已加载', usageHist.length, '点');
+    .filter(p => p && p.t);
+  console.log('[usage] 历史已加载', usageHist.length, '点(永久保留)');
 } catch { /* 首次运行无文件 */ }
+function usageHistBackup() {
+  try {
+    const src = fs.statSync(USAGE_HIST_FILE).size;
+    let bak = 0;
+    try { bak = fs.statSync(USAGE_HIST_BAK).size; } catch { /* 还没备份过 */ }
+    if (src >= bak) fs.copyFileSync(USAGE_HIST_FILE, USAGE_HIST_BAK);
+  } catch (e) { console.log('[usage] 历史冷备失败:', e.message); }
+}
+setTimeout(usageHistBackup, 60 * 1000);                    // 起来一分钟后先备一份
+setInterval(usageHistBackup, 24 * 3600 * 1000);            // 之后每天一次
+function usageHistBytes() {
+  try { return fs.statSync(USAGE_HIST_FILE).size; } catch { return 0; }
+}
+/* 长档位(尤其"全部")点数会很多: 全塞给前端既费带宽、SVG 折线也画不动。
+   按时间分桶抽稀, 每桶只留"三条线里最高的那个真实采样点" —— 保住峰值(到底有没有摸到 100%),
+   给出去的都是真实采样、不是插值; 首尾点强制保留(左端 = 真正最早那条记录, 右端 = 现在)。
+   阈值给到 4000: 宽屏图区才 ~3700px, 再多也超出像素分辨率了; 4000 点以内一律原样给, 不动它。
+   注意采样点是不等距的(没变化就 5 分钟才记一个), 桶宽按时间算才不会把稀疏时段抹平。 */
+const USAGE_HIST_MAX_POINTS = 4000;
+function thinHist(pts, maxN) {
+  if (pts.length <= maxN) return pts;
+  const hi = p => Math.max(p.s || 0, p.w || 0, p.o || 0);
+  const t0 = pts[0].t, span = (pts[pts.length - 1].t - t0) || 1, bw = span / maxN;
+  const out = [];
+  let bi = -1, best = null;
+  for (const p of pts) {
+    const b = Math.floor((p.t - t0) / bw);
+    if (b !== bi) { if (best) out.push(best); bi = b; best = p; }
+    else if (hi(p) > hi(best)) best = p;
+  }
+  if (best) out.push(best);
+  if (out[0] !== pts[0]) out.unshift(pts[0]);
+  const last = pts[pts.length - 1];
+  if (out[out.length - 1] !== last) out.push(last);
+  return out;
+}
 function usageHistAppend(d) {
   if (!d) return;
   const r1 = v => (v == null ? null : Math.round(v * 10) / 10);
@@ -745,11 +780,7 @@ function usageHistAppend(d) {
   if (last && p.t - last.t < 5 * 60 * 1000 && last.s === p.s && last.w === p.w && last.o === p.o) return;
   usageHist.push(p);
   try { fs.appendFileSync(USAGE_HIST_FILE, JSON.stringify(p) + '\n'); } catch (e) { console.log('[usage] 历史写盘失败:', e.message); }
-  if (usageHist.length % 500 === 0) {   // 定期裁剪 + 重写(把 30 天外的甩掉)
-    const cut = Date.now() - USAGE_HIST_KEEP_MS;
-    usageHist = usageHist.filter(x => x.t > cut);
-    try { fs.writeFileSync(USAGE_HIST_FILE, usageHist.map(x => JSON.stringify(x)).join('\n') + '\n'); } catch {}
-  }
+  // 这里从前有个"每 500 点重写文件裁掉 30 天外"的分支, 已删: 永久保留 = 只追加, 不重写。
 }
 
 async function fetchUsage() {
@@ -772,11 +803,10 @@ async function fetchUsage() {
       const ivMin = Math.max(1, (config.usage && config.usage.intervalMin) || 1);   // 管理台可调, 下限 1 分钟
       usage.nextTryAt = Date.now() + ivMin * 60 * 1000 - 5000;   // 成功后按配置间隔(留 5s 余量迎合 60s tick)
     } else if (r.status === 401) {
-      // 令牌失效: 清空文件里的令牌有效期, 交给 CLI 重新刷新; 60s 后重读
-      const creds = readCreds(); creds.claudeAiOauth.expiresAt = 0; writeCreds(creds);
+      // 令牌失效。以前这里会把文件里的 expiresAt 清零去催刷新 —— 现在副屏一个字节都不写凭据文件, 只报状态。
       usage.expiredSince = usage.expiredSince || Date.now();
-      usage.error = '令牌失效, 等待重新获取';
-      usage.nextTryAt = Date.now() + 60 * 1000;
+      usage.error = '令牌失效, 需在终端跑 claude 再 /login';
+      usage.nextTryAt = Date.now() + 60 * 1000;   // 每分钟重读文件, 你一登录就自己好
     } else {
       const mins = Math.round(usage.backoffMs / 60000);
       usage.error = r.status === 429 ? `接口限流冷却中，${mins} 分钟后重试` : `HTTP ${r.status}`;
@@ -1283,13 +1313,15 @@ function findSvv() {
   try { const p = path.join(__dirname, 'tools', 'svv', 'SoundVolumeView.exe'); if (fs.existsSync(p)) return p; } catch {}
   return null;
 }
-// 把某进程的默认输出设备设为 deviceId(all 角色); 每个 pid 各设一次
+// 把某进程的默认输出设备设为 deviceId(all 角色); 每个 pid 各设一次。
+// deviceId='__sysdefault__' -> "DefaultRenderDevice"(跟随系统默认, 取消单独指定)
 function routeAppOutput(pids, deviceId) {
   const svv = findSvv();
   if (!svv || !deviceId) return false;
+  const dev = deviceId === '__sysdefault__' ? 'DefaultRenderDevice' : String(deviceId);
   for (const pid of (pids || [])) {
     if (!pid) continue;
-    execFile(svv, ['/SetAppDefault', String(deviceId), 'all', String(pid | 0)], { timeout: 8000 }, () => {});
+    execFile(svv, ['/SetAppDefault', dev, 'all', String(pid | 0)], { timeout: 8000 }, () => {});
   }
   return true;
 }
@@ -1444,17 +1476,28 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, getClaudeSessions(u.searchParams.get('debug')));   // ?debug=1 附带原始判定
   }
   if (u.pathname === '/api/usage/detail') {   // 额度详情: 全部限额条目 + 历史走势(给宽屏弹层)
-    const hours = Math.min(24 * 30, Math.max(1, Number(u.searchParams.get('hours')) || 24));
-    const cut = Date.now() - hours * 3600 * 1000;
+    const hq = u.searchParams.get('hours');
+    const hn = hq == null ? 24 : Number(hq);
+    const hours = Number.isFinite(hn) ? hn : 24;         // ≤0 = 全部历史(永久保留, 不再有 30 天上限)
+    const cut = hours > 0 ? Date.now() - hours * 3600 * 1000 : 0;
     let tokenExpiresAt = null;
     try { tokenExpiresAt = readCreds().claudeAiOauth.expiresAt; } catch { /* 无凭据 */ }
+    // 窗口外再多带一个点当"锚": 否则半夜关机后早上看 6 小时档, 线只画得出右边一小截。
+    // 有了锚点, 前端能把周额度按"值不动"平推到左边缘(锚点落在 viewBox 外, SVG 自己会裁掉)。
+    const i0 = usageHist.findIndex(p => p.t >= cut);
+    const win = i0 < 0 ? usageHist.slice(-1) : usageHist.slice(Math.max(0, i0 - 1));
     return json(res, 200, {
       usage: usage.data, limits: usage.limits || [],
       fetchedAt: usage.fetchedAt, error: usage.error, nextTryAt: usage.nextTryAt,
       intervalMin: Math.max(1, (config.usage && config.usage.intervalMin) || 1),
       tokenExpiresAt,
-      history: usageHist.filter(p => p.t >= cut),
+      history: thinHist(win, USAGE_HIST_MAX_POINTS),
+      historyShown: win.length,                          // 抽稀前该档位实际有多少点
       historyTotal: usageHist.length,
+      historyFrom: usageHist.length ? usageHist[0].t : null,
+      historyBytes: usageHistBytes(),
+      // 预估"还有多久到 100%"专用: 近 100 分钟原始点, 不受档位/抽稀影响(否则选"全部"时基准点会被抽走)
+      recent: usageHist.filter(p => p.t >= Date.now() - 100 * 60 * 1000),
     });
   }
   if (u.pathname === '/api/extras') {

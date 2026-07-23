@@ -68,6 +68,9 @@ html, body { width: 3840px; height: 1100px; overflow: hidden; background: #0a0c1
 
 /* ---------- 看板页 ---------- */
 #page-board .body { display: grid; grid-template-columns: 35fr 30fr 20fr 15fr; gap: 22px; }
+/* fr 轨道最小尺寸默认 = 内容 min-content, 超长文本(如很长的正在播放标题)会把该段撑爆、抢走别段宽度。
+   给所有直接子项 min-width:0, 让每段严格按 fr 份额收缩, 内部再靠各自的 ellipsis/overflow 截断。 */
+#page-board .body > * { min-width: 0; }
 
 #perfGrid { display: grid; grid-template-columns: repeat(3, 1fr); grid-template-rows: 1fr 1fr; gap: 16px; }
 .ptile { position: relative; overflow: hidden; padding: 28px 32px; display: flex; flex-direction: column; }
@@ -103,7 +106,14 @@ html, body { width: 3840px; height: 1100px; overflow: hidden; background: #0a0c1
 .hbar > i { display: block; height: 100%; border-radius: 9px; background: var(--accent); transition: width .6s; }
 #usageMeta { font-size: 27px; color: #8A96A6; }
 #usageTok { font-size: 25px; color: #718092; }
-#usageTok.warn { color: #F59E0B; } #usageTok.crit { color: #F87171; }
+/* 平时(令牌还早)就一行小灰字, 不打扰; 剩 ≤30 分钟 / 已过期才"弹"成会呼吸的警告条, 附上该干什么 */
+#usageTok.warn, #usageTok.crit {
+  display: inline-block; margin-top: 10px; padding: 9px 20px; border-radius: 13px;
+  font-size: 27px; font-weight: 800; animation: tokPulse 1.6s ease-in-out infinite;
+}
+#usageTok.warn { color: #F59E0B; background: rgba(245, 158, 11, .12); border: 1px solid rgba(245, 158, 11, .45); }
+#usageTok.crit { color: #F87171; background: rgba(248, 113, 113, .14); border: 1px solid rgba(248, 113, 113, .55); animation-duration: 1s; }
+@keyframes tokPulse { 0%, 100% { opacity: 1; } 50% { opacity: .42; } }
 
 #mediaCol { display: flex; flex-direction: column; gap: 16px; min-height: 0; }
 #npCard { padding: 24px 28px; display: flex; gap: 24px; align-items: center; flex: none; }
@@ -307,7 +317,7 @@ html, body { width: 3840px; height: 1100px; overflow: hidden; background: #0a0c1
 .mix .fader { flex: 1; width: 76px; border-radius: 16px; background: #1a212c; position: relative; touch-action: none; min-height: 120px; }
 .mix .fader > i { position: absolute; left: 0; right: 0; bottom: 0; border-radius: 16px; background: color-mix(in srgb, var(--accent) 75%, #6b4a10); }
 .mix .v { font-size: 27px; color: #B9C3CF; font-family: 'JetBrains Mono', monospace; }
-.mix .mut { font-size: 23px; padding: 8px 20px; border-radius: 12px; border: 1px solid #2f3948; color: #8A96A6; }
+.mix .mut { font-size: 28px; padding: 14px 34px; border-radius: 14px; border: 1px solid #2f3948; color: #C9D3DE; font-weight: 700; }
 .mix.muted .mut { color: #F87171; border-color: #EF4444; background: #2a1a1e; }
 .mix.muted .fader > i { background: #525E6E; }
 #micCol { display: flex; flex-direction: column; gap: 16px; }
@@ -377,14 +387,21 @@ html, body { width: 3840px; height: 1100px; overflow: hidden; background: #0a0c1
 #usgLegend i { display: inline-block; width: 26px; height: 8px; border-radius: 4px; margin-right: 12px; vertical-align: middle; }
 #usgRanges { position: absolute; right: 30px; top: 24px; display: flex; gap: 14px; z-index: 1; }
 #usgEmpty { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 30px; color: #525E6E; }
-#usgSide { display: flex; flex-direction: column; gap: 14px; min-height: 0; overflow: hidden; }
-.usg-limit { background: #0d1118; border-radius: 18px; padding: 16px 30px; flex: none; }
+#usgNow { position: absolute; left: 76px; right: 30px; top: 96px; bottom: 70px; pointer-events: none; z-index: 1; }
+#usgNow span { position: absolute; right: 0; transform: translateY(-50%); font-size: 26px; font-weight: 800; font-family: 'JetBrains Mono', monospace; background: #0d1118; padding: 1px 9px; border-radius: 9px; white-space: nowrap; }
+#usgSide { display: flex; flex-direction: column; gap: 11px; min-height: 0; overflow-y: auto; overflow-x: hidden; }
+.usg-limit { background: #0d1118; border-radius: 18px; padding: 12px 30px; flex: none; }
 .usg-limit .row { display: flex; justify-content: space-between; align-items: baseline; }
 .usg-limit .nm { font-size: 29px; color: #9AA6B5; }
 .usg-limit .pv { font-size: 50px; font-weight: 800; font-family: 'JetBrains Mono', monospace; }
 .usg-limit .pv.warn { color: #F59E0B; } .usg-limit .pv.crit { color: #F87171; }
-.usg-limit .hbar { margin: 12px 0 10px; }
+.usg-limit .hbar { margin: 10px 0 8px; }
 .usg-limit .rs { font-size: 25px; color: #718092; }
+.usg-limit .proj { font-size: 23px; color: #8a94a5; margin-top: 4px; }
+.usg-limit .proj b { font-family: 'JetBrains Mono', monospace; font-weight: 800; color: #C9D3DE; }
+.usg-limit .proj.warn { color: #C99A5B; } .usg-limit .proj.warn b { color: #F59E0B; }
+.usg-limit .proj.crit { color: #C97B7B; } .usg-limit .proj.crit b { color: #F87171; }
+.usg-limit .proj.dim { color: #5c6774; }
 .usg-meta { background: #0d1118; border-radius: 18px; padding: 12px 30px; margin-top: auto; flex: none; }
 .usg-meta .mrow { display: flex; justify-content: space-between; font-size: 25px; color: #718092; padding: 4px 0; }
 .usg-meta .mrow b { color: #C9D3DE; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
@@ -445,9 +462,9 @@ html, body { width: 3840px; height: 1100px; overflow: hidden; background: #0a0c1
 #npCover.has-img, #mCover.has-img { background-size: cover; background-position: center; color: transparent; }
 
 /* 分应用输出设备按钮 + 弹层 */
-.mix .appout { display: flex; align-items: center; gap: 8px; font-size: 21px; padding: 8px 14px; border-radius: 12px;
-  border: 1px solid #2a3342; color: #718092; max-width: 96%; }
-.mix .appout svg { width: 26px; height: 26px; stroke: #718092; stroke-width: 2; fill: none; stroke-linecap: round; flex: none; }
+.mix .appout { display: flex; align-items: center; gap: 10px; font-size: 25px; padding: 14px 22px; border-radius: 14px;
+  border: 1px solid #37455a; color: #9AA6B5; font-weight: 700; max-width: 96%; }
+.mix .appout svg { width: 32px; height: 32px; stroke: #9AA6B5; stroke-width: 2; fill: none; stroke-linecap: round; flex: none; }
 .mix .appout span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #appOutPick { position: fixed; width: 620px; z-index: 66; background: #0e1218; border: 1px solid #2a3342;
   border-radius: 18px; padding: 16px; box-shadow: 0 16px 50px rgba(0,0,0,.7); display: flex; flex-direction: column; gap: 8px; }

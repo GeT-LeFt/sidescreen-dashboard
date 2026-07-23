@@ -78,13 +78,11 @@ $$('.edge').forEach(edge => {
   edge.addEventListener('pointerup', end);
   edge.addEventListener('pointercancel', end);
 });
-/* 键盘切页: PageUp 上一页 / PageDown 下一页(副驾驶页与弹层开启时不响应) */
+/* 键盘切页 PageUp/PageDown: 统一走 wideFlip(弹层开着会先强制关闭再翻; 游戏副驾驶页不翻) */
 window.addEventListener('keydown', e => {
   if (e.key !== 'PageUp' && e.key !== 'PageDown') return;
-  if (gameOn || ovlMask.classList.contains('show')) return;
   e.preventDefault();
-  if (e.key === 'PageUp' && page > 0) gotoPage(page - 1);
-  else if (e.key === 'PageDown' && page < 3) gotoPage(page + 1);
+  wideFlip(e.key === 'PageUp' ? -1 : 1);
 });
 if (!localStorage.getItem('omdash-edgehint')) {   // 首次提示 2.6s
   document.body.classList.add('edgehint');
@@ -307,7 +305,12 @@ async function pollClaude() {
   if (c.tokenExpiresAt) {
     const min = Math.round((c.tokenExpiresAt - Date.now()) / 60000);
     tok.classList.toggle('crit', min <= 0); tok.classList.toggle('warn', min > 0 && min < 30);
-    tok.textContent = min <= 0 ? '⬤ OAuth 令牌已过期' : (min < 60 ? `⬤ OAuth 令牌 ${min} 分钟后过期` : `⬤ OAuth 令牌 ${Math.floor(min / 60)} 小时后过期`);
+    // 副屏不会自己续期(纯只读) -> 快到期时得把"该干什么"直接写在脸上, 免得盯着时间算
+    const act = ' · 去终端 claude 里 /login';
+    tok.textContent = min <= 0 ? '⚠ OAuth 令牌已过期' + act
+      : min < 30 ? `⚠ OAuth 令牌 ${min} 分钟后过期` + act
+      : min < 60 ? `⬤ OAuth 令牌 ${min} 分钟后过期`
+      : `⬤ OAuth 令牌 ${Math.floor(min / 60)} 小时后过期`;
   } else tok.textContent = '';
 }
 setInterval(pollClaude, 30 * 1000); pollClaude();
@@ -315,11 +318,14 @@ setInterval(pollClaude, 30 * 1000); pollClaude();
 /* ---------- 额度详情弹层(点会话额度卡打开): 全部限额 + 历史走势 ---------- */
 const USG_SERIES = [
   { k: 's', label: '会话', color: 'var(--accent)', hex: '#F59E0B' },
-  { k: 'w', label: '周额度', color: '#5B9CF5', hex: '#5B9CF5' },
-  { k: 'o', label: 'Opus', color: '#B48CF2', hex: '#B48CF2' },
+  // hold: 断档期间"值保持不动"的线。周额度一周内只增不减, 没用它就不会动 -> 断档可以补齐;
+  // 会话额度 5 小时就滚动重置, 断档期间几乎必然变过 -> 不补, 断着才是实话。
+  { k: 'w', label: '周额度', color: '#5B9CF5', hex: '#5B9CF5', hold: true },
+  { k: 'o', label: 'Opus', color: '#B48CF2', hex: '#B48CF2', hold: true },
 ];
 let usgHours = 24;
-const USG_RANGES = [[12, '12 小时'], [24, '24 小时'], [24 * 7, '7 天'], [24 * 30, '30 天']];
+// 0 = 全部历史(服务端永久保留, 点多了会分桶抽稀后再给)
+const USG_RANGES = [[1, '1 小时'], [6, '6 小时'], [12, '12 小时'], [24, '24 小时'], [24 * 7, '7 天'], [24 * 30, '30 天'], [0, '全部']];
 function fmtAbs(ts) {
   const d = new Date(ts);
   return `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
@@ -329,6 +335,11 @@ function fmtLeft(ms) {
   const h = Math.floor(ms / 3600000), m = Math.round(ms % 3600000 / 60000);
   if (h >= 48) return Math.floor(h / 24) + ' 天 ' + (h % 24) + ' 小时后';
   return (h ? h + ' 小时 ' : '') + m + ' 分钟后';
+}
+function fmtDay(ts) { const d = new Date(ts); return `${d.getMonth() + 1}/${d.getDate()}`; }
+function fmtKB(b) {
+  if (!b) return '—';
+  return b < 1024 * 1024 ? Math.round(b / 1024) + ' KB' : (Math.round(b / 1048576 * 10) / 10) + ' MB';
 }
 function fmtAgo(ms) {
   const m = Math.round(ms / 60000);
@@ -340,35 +351,139 @@ function usgKindLabel(l) {
   if (l.kind === 'weekly_scoped') return ((l.scope && l.scope.model && l.scope.model.display_name) || 'Opus') + ' · 周额度';
   return l.kind || '未知限额';
 }
+/* 按最近 1 小时的用量增速, 预估还有多久到 100%(给周额度卡用)。
+   基准取"1 小时前那一刻"的采样值, 现值取限额接口的实时 percent, 算 %/小时后线性外推。
+   history 点: {t, s:会话%, w:周%, o:Opus%}; 期间若掉一大截视为重置过、不给预估。 */
+const USG_KIND_KEY = { session: 's', weekly_all: 'w', weekly_scoped: 'o' };
+function projToFull(kind, curPct, history) {
+  const key = USG_KIND_KEY[kind];
+  if (!key || curPct == null) return null;
+  const now = Date.now(), winStart = now - 3600 * 1000;
+  const pts = (history || []).filter(p => p[key] != null);
+  if (!pts.length) return null;
+  let base = null;                                   // 窗口起点前最后一个点 = 1 小时前的值; 没有就用最早的点
+  for (const p of pts) { if (p.t <= winStart) base = p; else break; }
+  if (!base) base = pts[0];
+  const dtH = (now - base.t) / 3600000;
+  if (dtH < 1 / 12) return null;                      // 跨度不足 5 分钟, 估不准
+  const dv = curPct - base[key];
+  if (dv < -0.5) return { reset: true };              // 掉一大截 = 期间重置过
+  const rate = dv / dtH;                              // %/小时
+  if (rate < 0.05) return { flat: true };             // 基本不涨
+  return { hours: (100 - curPct) / rate };
+}
+function fmtDur(h) {
+  if (h >= 24) { const d = Math.floor(h / 24), r = Math.round(h % 24); return d + ' 天' + (r ? ' ' + r + ' 小时' : ''); }
+  if (h >= 10) return Math.round(h) + ' 小时';
+  return (Math.round(h * 10) / 10) + ' 小时';
+}
+function projLine(kind, curPct, history) {
+  if (curPct != null && curPct >= 100) return '<div class="proj crit">⏳ 已到本周上限</div>';
+  const p = projToFull(kind, curPct, history);
+  if (!p) return '<div class="proj dim">⏳ 近 1 时样本不足 · 暂无预估</div>';
+  if (p.reset) return '<div class="proj dim">⏳ 近 1 小时内已重置 · 重新累积中</div>';
+  if (p.flat) return '<div class="proj dim">⏳ 近 1 小时基本不涨</div>';
+  const cls = p.hours <= 6 ? 'proj crit' : p.hours <= 24 ? 'proj warn' : 'proj';
+  return `<div class="${cls}">⏳ 按近 1 时速度 · 约 <b>${fmtDur(p.hours)}</b>到 100%</div>`;
+}
 function drawUsageChart(d) {
   const svg = $('#usgChart'), xl = $('#usgXlab'); if (!svg) return;
   const hist = d.history || [];
-  const now = Date.now(), t0 = now - usgHours * 3600 * 1000, span = now - t0;
+  // "全部"档(usgHours=0): 左端取最早那个采样点; 还没数据就退回 1 小时, 免得 span=0
+  const now = Date.now();
+  const t0 = usgHours > 0 ? now - usgHours * 3600 * 1000
+                          : (hist.length ? Math.min(hist[0].t, now - 3600 * 1000) : now - 3600 * 1000);
+  const span = now - t0;
   const X = t => ((t - t0) / span) * 1000;
   const Y = v => 290 - (v / 100) * 270;   // viewBox 1000x300, 上下留 10/20
-  const gapMs = Math.max(span / 40, 20 * 60 * 1000);   // 数据断档(服务停跑)不连线
+  const gapMs = Math.max(span / 40, 20 * 60 * 1000);   // 断档(半夜关机 / 服务没跑)阈值
   let out = [25, 50, 75, 100].map(v =>
     `<line x1="0" x2="1000" y1="${Y(v)}" y2="${Y(v)}" stroke="#1a212c" stroke-width="1" vector-effect="non-scaling-stroke"/>`).join('');
+  /* 断档怎么画:
+     - hold 线(周额度/Opus): 按上一个值平推过断档, 到下一个采样点再阶跃 —— 一周内它只增不减, 没人用就不动;
+       但若断档后的值反而更低, 说明这中间重置过、掉在哪一刻无从得知 -> 照旧断开, 不瞎连。
+     - 会话额度: 5 小时滚动, 断档期间必然变过 -> 一律断开。 */
   for (const s of USG_SERIES) {
-    let dstr = '', prev = 0;
+    let dstr = '', prevT = 0, prevV = 0;
     for (const p of hist) {
-      if (p[s.k] == null) { prev = 0; continue; }
-      dstr += `${!prev || p.t - prev > gapMs ? 'M' : 'L'}${X(p.t).toFixed(1)},${Y(p[s.k]).toFixed(1)}`;
-      prev = p.t;
+      const v = p[s.k];
+      if (v == null) { prevT = 0; continue; }
+      const x = X(p.t).toFixed(1), y = Y(v).toFixed(1);
+      const gap = prevT && p.t - prevT > gapMs;
+      if (gap && s.hold && v + 0.5 >= prevV) dstr += `L${x},${Y(prevV).toFixed(1)}L${x},${y}`;   // 平推到断档末端再阶跃
+      else dstr += `${!prevT || gap ? 'M' : 'L'}${x},${y}`;
+      prevT = p.t; prevV = v;
     }
     if (dstr) out += `<path d="${dstr}" fill="none" stroke="${s.hex}" stroke-width="2.6" vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"/>`;
   }
   svg.innerHTML = out;
-  /* 时间刻度(HTML 层, 不随 SVG 拉伸变形) */
+  /* 时间刻度(HTML 层, 不随 SVG 拉伸变形): 按档位选"整"时间步长, 短档到分钟、密一点 */
   if (xl) {
-    const n = 6, ticks = [];
-    for (let i = 0; i <= n; i++) {
-      const t = t0 + span * (i / n), dt = new Date(t);
-      const lb = usgHours <= 48 ? String(dt.getHours()).padStart(2, '0') + ':00' : (dt.getMonth() + 1) + '/' + dt.getDate();
-      const tf = i === 0 ? 'translateX(0)' : i === n ? 'translateX(-100%)' : 'translateX(-50%)';   // 两端不出界
-      ticks.push(`<span style="left:${(i / n * 100).toFixed(1)}%;transform:${tf}">${lb}</span>`);
+    const M = 60000, DAY = 1440 * M;
+    const steps = [5 * M, 10 * M, 15 * M, 30 * M, 60 * M, 120 * M, 180 * M, 360 * M, 720 * M, DAY, 2 * DAY, 3 * DAY, 7 * DAY, 14 * DAY];
+    let step = 0;
+    for (const s of steps) { if (span / s <= 12) { step = s; break; } }   // 目标 ≤12 个刻度
+    const mode = !step ? 'month' : step >= DAY ? 'day' : 'time';          // 半年以上没有合适步长 -> 按月
+    const yearly = span > 400 * DAY;                                      // 跨年了就把年份标上, 否则"8月"分不清哪年
+    const tickTs = [];
+    if (mode === 'month') {                            // 按月初打点; 隔几个月取 12 的因子, 保证每年落在相同月份
+      const per = [1, 2, 3, 6, 12].find(v => span / DAY / 30.44 / v <= 12) || 12;
+      const c = new Date(t0); c.setDate(1); c.setHours(0, 0, 0, 0);
+      while (c.getTime() < t0) c.setMonth(c.getMonth() + 1);
+      for (; c.getTime() <= now; c.setMonth(c.getMonth() + per)) tickTs.push(c.getTime());
+    } else if (mode === 'day') {                       // 按天: 对齐本地午夜
+      const d0 = new Date(t0); d0.setHours(0, 0, 0, 0);
+      for (let t = d0.getTime(); t <= now; t += step) { if (t >= t0) tickTs.push(t); }
+    } else {                                           // 小时/分钟: 对齐"整"边界(中国 +8 为整小时, epoch 对齐即整点整分)
+      for (let t = Math.ceil(t0 / step) * step; t <= now; t += step) tickTs.push(t);
     }
-    xl.innerHTML = ticks.join('');
+    xl.innerHTML = tickTs.map(t => {
+      const dt = new Date(t), leftPct = (t - t0) / span * 100;
+      const lb = mode === 'month' ? (yearly || !dt.getMonth() ? String(dt.getFullYear()).slice(2) + '/' + (dt.getMonth() + 1) : (dt.getMonth() + 1) + '月')
+               : mode === 'day' ? (dt.getMonth() + 1) + '/' + dt.getDate()
+               : String(dt.getHours()).padStart(2, '0') + ':' + String(dt.getMinutes()).padStart(2, '0');
+      const tf = leftPct < 4 ? 'translateX(0)' : leftPct > 96 ? 'translateX(-100%)' : 'translateX(-50%)';   // 两端不出界
+      return `<span style="left:${leftPct.toFixed(1)}%;transform:${tf}">${lb}</span>`;
+    }).join('');
+  }
+  /* 右端当前值标签: Y 轴刻度在左, 右端(=现在)原本没参照 -> 在右边贴各线当前 % (颜色对应图例)。
+     几条线数值挨得近时(如刚重置后 16/18/20%)标签会叠成一坨 -> 防重叠: 按理想位置排序,
+     相邻不足一个标签高就对半推开、迭代到收敛, 最后整体夹回框内。推开后仍靠颜色对应到各自的线。 */
+  const nowEl = $('#usgNow');
+  if (nowEl) {
+    const curOf = { s: d.usage && d.usage.session, w: d.usage && d.usage.weekAll, o: d.usage && d.usage.weekScoped };
+    const items = [];
+    for (const s of USG_SERIES) {
+      let v = curOf[s.k] ? curOf[s.k].pct : null;
+      if (v == null) { for (let i = hist.length - 1; i >= 0; i--) { if (hist[i][s.k] != null) { v = hist[i][s.k]; break; } } }
+      if (v == null) continue;
+      items.push({ hex: s.hex, v, y: Y(v) / 300 * 100 });     // y = 理想位置(占框高的 %)
+    }
+    /* 先按理想位置画出来, 再用"真实量到的标签高"算间距(别写死常量: 字号/缩放变了会失准) */
+    nowEl.innerHTML = items.map(it =>
+      `<span style="top:${it.y.toFixed(1)}%;color:${it.hex}">${Math.round(it.v)}%</span>`).join('');
+    const spans = [...nowEl.querySelectorAll('span')];
+    items.forEach((it, i) => { it.el = spans[i]; });
+    const boxH = nowEl.clientHeight || 640;
+    const tagH = (spans[0] && spans[0].offsetHeight) || 37;
+    const gap = Math.min(30, (tagH + 8) / boxH * 100);        // 标签实高 + 8px 呼吸空间
+    items.sort((a, b) => a.y - b.y);
+    for (let n = 0; n < 16 && items.length > 1; n++) {
+      let moved = false;
+      for (let i = 1; i < items.length; i++) {
+        const over = items[i - 1].y + gap - items[i].y;
+        if (over > 0.01) { items[i - 1].y -= over / 2; items[i].y += over / 2; moved = true; }
+      }
+      if (!moved) break;
+    }
+    if (items.length) {                                        // 整体平移夹回框内(保持已拉开的间距)
+      const lo = gap / 2, hi = 100 - gap / 2;
+      const down = Math.max(0, lo - items[0].y);
+      for (const it of items) it.y += down;
+      const up = Math.max(0, items[items.length - 1].y - hi);
+      for (const it of items) it.y -= up;
+    }
+    for (const it of items) it.el.style.top = it.y.toFixed(1) + '%';   // 位置写回(元素已在, 别重建)
   }
   const hint = $('#usgEmpty');
   if (hint) hint.style.display = hist.length > 1 ? 'none' : '';
@@ -388,16 +503,25 @@ async function renderUsageOvl() {
     const pct = Math.round(l.percent || 0);
     const rst = l.resets_at ? Date.parse(l.resets_at) : null;
     const color = l.kind === 'weekly_all' ? '#5B9CF5' : l.kind === 'weekly_scoped' ? '#B48CF2' : 'var(--accent)';
+    // 周额度(全部模型/Opus)才给"还有多久到 100%"的预估; 会话额度 5 小时就重置, 不外推
+    const isWeek = l.kind === 'weekly_all' || l.kind === 'weekly_scoped';
+    // 用 recent(近 100 分钟原始点)而不是 history: 长档位的 history 被抽稀过, 拿它算速度会失真
+    const proj = isWeek ? projLine(l.kind, l.percent, d.recent || d.history) : '';
     return `<div class="usg-limit">
       <div class="row"><span class="nm">${esc(usgKindLabel(l))}</span><b class="pv ${sevCls(l.severity)}">${pct}%</b></div>
       <div class="hbar"><i style="width:${Math.min(100, pct)}%;background:${color}"></i></div>
       <div class="rs">${rst ? '重置 ' + fmtLeft(rst - Date.now()) + ' · ' + fmtAbs(rst) : '—'}</div>
+      ${proj}
     </div>`;
   }).join('') : '<div class="empty">尚未拉到额度数据</div>';
   const metas = [];
   metas.push(['上次更新', d.fetchedAt ? fmtAgo(Date.now() - d.fetchedAt) : '—']);
   metas.push(['采样间隔', d.intervalMin + ' 分钟']);
-  metas.push(['历史样本', (d.historyTotal || 0) + ' 点 · 保留 30 天']);
+  // 点数攒过 4000 后, 服务端会分桶抽稀再给图 -> 明说抽到了多少点, 别让人以为图上是全量
+  // 点数攒过 4000 后, 服务端会分桶抽稀再给图 -> 明说图上取了多少点, 别让人以为画的是全量
+  const thin = d.historyShown && d.history && d.history.length < d.historyShown ? ' · 图取 ' + d.history.length + ' 点' : '';
+  const from = d.historyFrom && !thin ? ', 起自 ' + fmtDay(d.historyFrom) : '';   // 抽稀时挤不下"起自", 让位(全部档 x 轴左端本来就写着起始日)
+  metas.push(['历史样本', (d.historyTotal || 0) + ' 点 · ' + fmtKB(d.historyBytes) + ' · 永久留存' + from + thin]);
   if (d.tokenExpiresAt) {
     const min = Math.round((d.tokenExpiresAt - Date.now()) / 60000);
     metas.push(['OAuth 令牌', min <= 0 ? '已过期' : fmtLeft(d.tokenExpiresAt - Date.now()).replace('后', '') + '后到期']);
@@ -407,10 +531,11 @@ async function renderUsageOvl() {
     `<div class="usg-meta">${metas.map(m => `<div class="mrow"><span>${esc(m[0])}</span><b>${esc(m[1])}</b></div>`).join('')}</div>`;
 }
 function openUsageOvl() {
-  openOvl('usage', 'CLAUDE CODE 用量', '官方 oauth/usage · 走势为本机每分钟采样', `
+  openOvl('usage', 'CLAUDE CODE 用量', '官方 oauth/usage · 每分钟拉取、值变即记点 · 百分比为整数精度', `
     <div id="usgOvl">
       <div id="usgLeft">
         <svg id="usgChart" viewBox="0 0 1000 300" preserveAspectRatio="none"></svg>
+        <div id="usgNow"></div>
         <div id="usgYlab"><span style="top:6.7%">100</span><span style="top:29.2%">75</span><span style="top:51.7%">50</span><span style="top:74.2%">25</span></div>
         <div id="usgXlab"></div>
         <div id="usgLegend">${USG_SERIES.map(s => `<span><i style="background:${s.hex}"></i>${s.label}</span>`).join('')}</div>
@@ -614,9 +739,12 @@ function renderExtras() {
 async function pollExtras() { extras = await get('/api/extras'); renderExtras(); renderTiles(); }
 setInterval(pollExtras, 2000); pollExtras();
 
-/* 全局热键翻页 */
+/* 全局热键翻页: 弹层开着时强制关闭并翻页(不用先手动退出); 游戏副驾驶页仍不翻 */
 function wideFlip(dir) {
-  if (gameOn || ovlMask.classList.contains('show')) return;   // 副驾驶/弹层时不翻
+  if (gameOn) return;
+  if (ovlMask.classList.contains('show')) closeOvl();          // 母版弹层(声音/额度/Steam/详情)
+  ['#appOutPick', '#outPick'].forEach(s => { const el = $(s); if (el) el.remove(); });   // 小设备选择器
+  // 到顶/到底就停住, 不绕回另一端(试过循环翻页, 用户明确要保持原样: 会话页再往上就是不动)
   gotoPage(Math.max(0, Math.min(3, page + (dir < 0 ? -1 : 1))));
 }
 /* 主通道 = SSE: 按键即时推, 几十毫秒到, 跟手 */
@@ -827,7 +955,7 @@ function openSoundOvl() {
             <span id="sndOvlVal" style="font-size:34px;font-weight:800;font-family:'JetBrains Mono'">--</span>
           </div></div>
       </div>
-      <div id="mixWrap"><h4 class="ovl-h4">分应用音量 · 拖推子调音量 · 静音 · 点⌂选输出设备</h4><div id="mixCols"></div></div>
+      <div id="mixWrap"><h4 class="ovl-h4">分应用音量 · 拖推子调音量 · 静音 · 点「输出设备」切换</h4><div id="mixCols"></div></div>
       <div id="micCol"><h4 class="ovl-h4">麦克风</h4>
         <div id="micBigBtn" class="press-sm"><svg viewBox="0 0 24 24"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/></svg><span>点按静音 · 方便盲按</span></div>
         <div id="micState">—</div><div id="micName"></div>
@@ -947,9 +1075,12 @@ function favDevices() {
   return list.length ? list : audio.devices;   // 一个都匹配不上就退回全列表
 }
 /* 分应用输出: 记住每个应用上次选的设备(localStorage), 按钮上显示 */
+const SYS_DEFAULT = '__sysdefault__';
 function appOutLabel(name) {
   const id = localStorage.getItem('appout:' + name);
-  if (!id || !audio || !audio.devices) return '输出设备';
+  if (!id) return '输出设备';
+  if (id === SYS_DEFAULT) return '跟随默认';
+  if (!audio || !audio.devices) return '输出设备';
   const d = audio.devices.find(x => x.id === id);
   return d ? devName(d.name).slice(0, 8) : '输出设备';
 }
@@ -958,12 +1089,17 @@ function openAppOutPick(anchor, g) {
   const devs = favDevices();
   if (!devs.length) { toast('音频服务未就绪'); return; }
   const savedId = localStorage.getItem('appout:' + g.name);
+  // 选项 = 跟随系统默认 + 各收藏设备
+  const opts = [{ id: SYS_DEFAULT, label: '跟随系统默认', sys: true }]
+    .concat(devs.map(d => ({ id: d.id, label: devName(d.name) })));
   const panel = document.createElement('div');
   panel.id = 'appOutPick';
-  panel.innerHTML = `<div class="hd">${esc(g.name)} 的输出</div>` + devs.map(d => `
-    <div class="opt press-sm ${d.id === savedId ? 'on' : ''}" data-dev="${esc(d.id)}">
-      <svg viewBox="0 0 24 24"><path d="M4 14a8 8 0 0 1 16 0"/><rect x="2.5" y="14" width="4.5" height="6" rx="2"/><rect x="17" y="14" width="4.5" height="6" rx="2"/></svg>
-      <span>${esc(devName(d.name))}</span>${d.id === savedId ? '<b>✓</b>' : ''}
+  panel.innerHTML = `<div class="hd">${esc(g.name)} 的输出</div>` + opts.map(o => `
+    <div class="opt press-sm ${o.id === savedId ? 'on' : ''}" data-dev="${esc(o.id)}">
+      <svg viewBox="0 0 24 24">${o.sys
+        ? '<path d="M12 3v18M4 8h16M4 16h16"/><circle cx="12" cy="12" r="9"/>'
+        : '<path d="M4 14a8 8 0 0 1 16 0"/><rect x="2.5" y="14" width="4.5" height="6" rx="2"/><rect x="17" y="14" width="4.5" height="6" rx="2"/>'}</svg>
+      <span>${esc(o.label)}</span>${o.id === savedId ? '<b>✓</b>' : ''}
     </div>`).join('');
   document.body.appendChild(panel);
   const br = anchor.getBoundingClientRect();
