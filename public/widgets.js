@@ -67,7 +67,7 @@ const RENDER = {
   usage(p, sz) {
     const foot = sz !== 'sm'
       ? `<div class="usage-foot"><span class="live" data-p="usageStatus">连接中…</span><span class="tok" data-p="usageToken"></span></div>` : '';
-    const rows = ['mSession|当前会话', 'mWeekAll|本周 · 全部模型', 'mWeekScoped|本周 · Fable'].map(x => {
+    const rows = ['mSession|Codex 周额度', 'mWeekAll|模型周额度', 'mWeekScoped|更多额度'].map(x => {
       const [k, n] = x.split('|');
       return `<div class="meter" data-m="${k}">
         <div class="row1"><span class="name">${n}</span><span class="pct">–</span></div>
@@ -75,7 +75,7 @@ const RENDER = {
         ${sz !== 'sm' ? '<div class="row2"><span class="reset"></span></div>' : ''}
       </div>`;
     }).join('');
-    return `<div class="tile-head"><span class="label">Claude 额度</span><span class="chip">Max 5×</span></div>
+    return `<div class="tile-head"><span class="label">Codex 额度</span><span class="chip" data-p="usagePlan">ChatGPT</span></div>
       <div class="meters">${rows}</div>${foot}`;
   },
   clock(p, sz) {
@@ -313,26 +313,29 @@ function setMeter(root, key, m) {
 function updateUsage(root, c) {
   if (!c) return;
   if (c.usage) {
-    setMeter(root, 'mSession', c.usage.session);
-    setMeter(root, 'mWeekAll', c.usage.weekAll);
-    const sc = c.usage.weekScoped;
-    if (sc && sc.label) root.querySelectorAll('[data-m="mWeekScoped"] .name').forEach(el => { el.textContent = '本周 · ' + sc.label; });
-    setMeter(root, 'mWeekScoped', sc);
+    const u = c.usage, main = u.main || u.weekAll || null;
+    const all = Array.isArray(u.buckets) ? u.buckets : [];
+    const aux = all.filter(x => !main || x.key !== main.key);
+    const rows = [main, aux[0] || null, aux[1] || null];
+    ['mSession', 'mWeekAll', 'mWeekScoped'].forEach((k, i) => {
+      const m = rows[i];
+      root.querySelectorAll(`[data-m="${k}"] .name`).forEach(el => {
+        el.textContent = m ? ((m.name || 'Codex') + (m.windowMins === 10080 ? ' · 周额度' : ' · 额度')) : '暂无更多额度';
+      });
+      setMeter(root, k, m);
+    });
+    const plan = (main && main.planType) || 'ChatGPT';
+    root.querySelectorAll('[data-p="usagePlan"]').forEach(el => { el.textContent = String(plan).toUpperCase(); });
   }
   root.querySelectorAll('[data-p="usageStatus"]').forEach(el => {
     if (c.error) { el.classList.add('stale'); el.textContent = c.error; }
     else if (c.fetchedAt) { el.classList.remove('stale'); el.textContent = '官方数据 · ' + new Date(c.fetchedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }) + ' 更新'; }
   });
-  // 令牌剩余有效期
+  // Codex App Server 自己管理登录态；这里显示 token 活动，不再展示/读取 OAuth 令牌。
   root.querySelectorAll('[data-p="usageToken"]').forEach(el => {
-    const t = c.tokenExpiresAt;
-    if (!t) { el.textContent = ''; el.classList.remove('warn', 'crit'); return; }
-    const min = Math.round((t - Date.now()) / 60000);
-    el.classList.toggle('crit', min <= 0);
-    el.classList.toggle('warn', min > 0 && min < 30);
-    if (min <= 0) el.textContent = '🔑 令牌已过期';
-    else if (min < 60) el.textContent = '🔑 令牌 ' + min + ' 分后过期';
-    else el.textContent = '🔑 令牌 ' + Math.floor(min / 60) + ' 时 ' + (min % 60) + ' 分后过期';
+    const u = c.usage || {}, n = Number(u.weekTokens) || 0;
+    el.classList.remove('warn', 'crit');
+    el.textContent = n ? ('近 7 日 ' + (n >= 1e6 ? (Math.round(n / 1e5) / 10) + 'M' : Math.round(n / 1e3) + 'K') + ' token') : '';
   });
 }
 

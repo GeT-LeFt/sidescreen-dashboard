@@ -14,5 +14,20 @@ node_modules/
 .DS_Store
 Thumbs.db
 
+# Local data and exports
+config.json
+scratchpad/
+.codex-backups/
+.env
+.env.*
+*.secret
+*.pem
+*.key
+*.bak
+*.tmp
+*.jsonl
+*.zip
+np-cover.img
+
 # 说明：真正的密钥（Claude OAuth token）在仓库外的
 # ~/.claude/.credentials.json，运行时读取，从不进本仓库。

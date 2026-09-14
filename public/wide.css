@@ -106,7 +106,8 @@ html, body { width: 3840px; height: 1100px; overflow: hidden; background: #0a0c1
 .hbar > i { display: block; height: 100%; border-radius: 9px; background: var(--accent); transition: width .6s; }
 #usageMeta { font-size: 27px; color: #8A96A6; }
 #usageTok { font-size: 25px; color: #718092; }
-/* 平时(令牌还早)就一行小灰字, 不打扰; 剩 ≤30 分钟 / 已过期才"弹"成会呼吸的警告条, 附上该干什么 */
+.usage-hidden { display: none !important; }
+/* 用量状态的普通/警告样式；Codex 登录态由官方 App Server 管理，正常只显示 token 活动摘要。 */
 #usageTok.warn, #usageTok.crit {
   display: inline-block; margin-top: 10px; padding: 9px 20px; border-radius: 13px;
   font-size: 27px; font-weight: 800; animation: tokPulse 1.6s ease-in-out infinite;
@@ -406,10 +407,12 @@ html, body { width: 3840px; height: 1100px; overflow: hidden; background: #0a0c1
 .usg-meta .mrow { display: flex; justify-content: space-between; font-size: 25px; color: #718092; padding: 4px 0; }
 .usg-meta .mrow b { color: #C9D3DE; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
 
-/* ---------- ⓪ Claude 会话页 ---------- */
-#claudeBody { display: grid; grid-template-columns: 560px 1fr 1fr; gap: 22px; height: 100%; }
+/* ---------- ⓪ Codex 会话页 ---------- */
+#claudeBody { display: grid; grid-template-columns: 560px minmax(0, 1fr) minmax(0, 1fr); gap: 22px; height: 100%; }
+/* 任务名和最后回复可能很长；grid/flex 的 auto min-content 会把整列撑出 3840px，必须允许三列按设计收缩。 */
+#claudeBody > *, .cs-card, .cs-card .head { min-width: 0; }
 /* 会话两列: 左运行中 / 右已完成, 各自竖排按时间 */
-.cs-col { display: flex; flex-direction: column; min-height: 0; gap: 14px; }
+.cs-col { display: flex; flex-direction: column; min-width: 0; min-height: 0; gap: 14px; }
 .col-hd { flex: none; font-size: 28px; font-weight: 800; letter-spacing: 2px; padding: 4px 8px;
   display: flex; align-items: center; gap: 14px; }
 .col-hd b { font-size: 34px; font-family: 'JetBrains Mono', monospace; }
@@ -429,6 +432,13 @@ html, body { width: 3840px; height: 1100px; overflow: hidden; background: #0a0c1
 #csMsg { font-size: 30px; color: #8A96A6; background: #10151d; border: 1px solid #1c222d; border-radius: 16px;
   padding: 18px 26px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #csMsg.warn { color: #F5C36B; border-color: color-mix(in srgb, var(--accent) 55%, #1c222d); }
+/* 设备小计「PC 3 · Kevin-Mac 1」: 只有一台设备时前端会置空, 这里自然塌成 0 高 */
+#csDevs { display: flex; flex-wrap: wrap; gap: 10px 14px; }
+#csDevs:empty { display: none; }
+#csDevs span { display: inline-flex; align-items: center; gap: 9px; font-size: 25px; color: #8A96A6;
+  background: #10151d; border: 1px solid #1c222d; border-radius: 999px; padding: 7px 18px; }
+#csDevs i { width: 14px; height: 14px; border-radius: 50%; background: var(--dev, #718092); flex: none; }
+#csDevs b { color: var(--dev, #C9D3DE); font-weight: 800; font-family: 'JetBrains Mono', monospace; }
 #csUsage { flex: 1; min-height: 0; padding: 24px 30px; display: flex; flex-direction: column; gap: 14px; cursor: pointer; }
 #csUsage .t { font-size: 24px; letter-spacing: 4px; color: #525E6E; font-weight: 700; display: flex; justify-content: space-between; }
 #csUsage .t .hint { letter-spacing: 0; font-weight: 400; color: #3d4756; }
@@ -442,7 +452,16 @@ html, body { width: 3840px; height: 1100px; overflow: hidden; background: #0a0c1
 .cs-card.running { border-color: rgba(91,156,245,.45); background: #0d1320; }
 .cs-card.done { border-color: rgba(74,222,128,.45); background: #0d1712; cursor: pointer; }
 .cs-card .head { display: flex; align-items: center; gap: 16px; }
-.cs-card .proj { font-size: 40px; font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 设备标: 卡片左端一枚色标, 颜色由 --dev 决定(PC 蓝 / Mac 紫), 两台机器的对话一眼分得开。
+   左边框也染成设备色 —— 但必须写在上面那三条状态色之后, 否则 .cs-card.running 的 border-color
+   是四边简写, 会把左边框一起盖掉(实测被盖成了状态色)。 */
+.cs-card.running, .cs-card.done, .cs-card.waiting { border-left: 5px solid var(--dev, #1c222d); }
+.cs-card .cs-dev { flex: none; font-size: 24px; font-weight: 800; letter-spacing: 1px;
+  color: var(--dev, #718092); background: color-mix(in srgb, var(--dev, #718092) 16%, transparent);
+  border: 1px solid color-mix(in srgb, var(--dev, #718092) 45%, transparent);
+  padding: 5px 15px; border-radius: 999px; max-width: 220px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cs-card .proj { flex: 1; min-width: 0; font-size: 40px; font-weight: 800; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cs-card .sid { font-size: 24px; color: #3d4756; font-family: 'JetBrains Mono', monospace; flex: none; }
 .cs-card .age { font-size: 26px; color: #525E6E; flex: none; margin-left: auto; }
 .cs-chip { flex: none; font-size: 26px; font-weight: 700; padding: 7px 20px; border-radius: 999px; }
@@ -452,6 +471,9 @@ html, body { width: 3840px; height: 1100px; overflow: hidden; background: #0a0c1
 .cs-card .act { font-size: 30px; color: #9AA6B5; font-family: 'JetBrains Mono', monospace;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-height: 40px; }
 .cs-card .act.warn { color: #F5C36B; font-family: 'Noto Sans SC', sans-serif; font-weight: 700; }
+/* 正在进行的动作(读 xx / 改 xx / $ 命令): 提亮 + 轻微呼吸, 跟"刚做完"的灰字区分开 */
+.cs-card .act.live { color: #C9D3DE; font-weight: 700; animation: actLive 2s ease-in-out infinite; }
+@keyframes actLive { 0%, 100% { opacity: 1; } 50% { opacity: .62; } }
 .cs-card .reply { font-size: 29px; color: #8A96A6; line-height: 1.5; overflow: hidden;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
 .cs-card .reply b { color: #525E6E; font-weight: 400; }

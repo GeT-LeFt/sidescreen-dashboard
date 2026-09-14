@@ -1,0 +1,12 @@
+{
+  "device": { "name": "My dashboard", "local": "Windows" },
+  "wideHotkey": { "enabled": true },
+  "hotkey": { "enabled": true, "mods": 0, "vk": 121, "label": "F10" },
+  "dashboardWindow": { "topmost": false },
+  "mouseGuard": { "enabled": false, "games": [] },
+  "calendar": { "icsUrl": "" },
+  "health": { "url": "" },
+  "weather": { "enabled": false, "city": "", "lat": null, "lon": null, "label": "" },
+  "notify": { "enabled": false },
+  "audio": { "favorites": ["Realtek"] }
+}

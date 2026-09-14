@@ -27,10 +27,9 @@ public class WM {
 [WM]::SetProcessDpiAwarenessContext([IntPtr]::new(-4)) | Out-Null   # PER_MONITOR_AWARE_V2，坐标用物理像素
 Add-Type -AssemblyName System.Windows.Forms
 
-# 检测副屏：优先 960x640，找不到取最小的非主屏
+# 检测小副屏：只认 960x640；不在线就跳过，绝不能拿长条屏/工作屏顶替。
 $side = [System.Windows.Forms.Screen]::AllScreens | Where-Object { $_.Bounds.Width -eq 960 -and $_.Bounds.Height -eq 640 } | Select-Object -First 1
-if (-not $side) { $side = [System.Windows.Forms.Screen]::AllScreens | Where-Object { -not $_.Primary } | Sort-Object { $_.Bounds.Width * $_.Bounds.Height } | Select-Object -First 1 }
-if (-not $side) { L("align: no side screen"); exit 1 }
+if (-not $side) { L("align: small screen not present, skipped") }
 
 function Align-Window($titleLike, $notLike, $scr, $tag) {
   if (-not $scr) { L("align: $tag screen not present, skipped"); return }

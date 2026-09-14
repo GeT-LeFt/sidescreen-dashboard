@@ -1,5 +1,6 @@
 ﻿# DDC/CI 亮度键代理: 轮询副屏亮度寄存器, 检测到物理按键(值变化)时恢复原值并向 stdout 报告 PRESS。
 # server.js 作为子进程拉起本脚本; 通过 ddc-cmd.txt 下发命令: "SET <0-100>" / "MODE rotate|native"
+param([int]$ParentPid = 0)
 $ErrorActionPreference = 'Continue'
 $cmdFile = Join-Path $PSScriptRoot 'ddc-cmd.txt'
 
@@ -72,6 +73,12 @@ Say "READY base=$base mode=readonly"
 
 while ($true) {
     Start-Sleep -Milliseconds 150
+
+    # Exit shortly after the owning Node process disappears; local Get-Process does not use WMI/RPC.
+    if ($ParentPid -gt 0 -and $tick % 30 -eq 0 -and -not (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue)) {
+        Log "parent $ParentPid exited; stopping"
+        break
+    }
 
     if (Test-Path $cmdFile) {
         $lines = @()

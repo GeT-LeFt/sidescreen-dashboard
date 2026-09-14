@@ -1,5 +1,5 @@
 // 副屏仪表盘服务端 — 零依赖 Node.js
-// 数据源: os 模块(CPU/RAM) + nvidia-smi(GPU) + Claude 官方 oauth/usage(经本地代理) + ~/.claude/projects 会话活动
+// 数据源: os 模块(CPU/RAM) + nvidia-smi(GPU) + Codex 官方 App Server(只读额度) + Claude/Codex 会话活动
 'use strict';
 
 const http = require('http');
@@ -9,11 +9,11 @@ const os = require('os');
 const fs = require('fs');
 const path = require('path');
 const { execFile, spawn } = require('child_process');
+const { readCodexAccountUsage } = require('./codex-usage');
 
 const PORT = 3777;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const PROJECTS_DIR = path.join(os.homedir(), '.claude', 'projects');
-const CRED_FILE = path.join(os.homedir(), '.claude', '.credentials.json');
 // 该地区直连 Anthropic 被拦, 必须走本地代理(Clash Verge 等)。默认读环境变量, 回退 7897。
 const PROXY_URL = process.env.HTTPS_PROXY || process.env.https_proxy ||
                   process.env.HTTP_PROXY || process.env.http_proxy || 'http://127.0.0.1:7897';
@@ -24,13 +24,13 @@ const CONFIG_FILE = path.join(__dirname, 'config.json');
 const VERSION = '1.0.0';
 
 const DEFAULT_CONFIG = {
-  device: { name: 'ProArt 副屏' },
+  device: { name: 'Windows 副屏' },
   theme: { accent: '#3987e5' },
   rotation: { keyCycles: false, intervalSec: 20 },   // keyCycles=亮度键翻页(这块屏上很别扭,默认关); intervalSec=自动轮换秒数(0=关)
   hotkey: { enabled: false, mods: 3, vk: 39, label: 'Ctrl + Alt + →' },   // 小副屏全局热键翻页
   wideHotkey: { enabled: true },   // 宽屏全局热键 PageUp/PageDown 翻页(系统级, 不需焦点; 副作用: 全局占用这两键)
   lyrics: { enabled: true, offsetSec: 0 },   // 正在播放+歌词(SMTC+lrclib 实时, 不落盘); offsetSec=歌词提前/延后微调(0.1s 级)
-  usage: { intervalMin: 1 },        // 额度刷新间隔(分钟), 1 为下限; 被限流时自动退避
+  usage: { intervalMin: 1 },        // Codex 额度刷新间隔(分钟), 1 为下限
   clock: { showSeconds: false },    // 时钟面板是否显示秒
   pageToast: { enabled: true },     // 切页时短暂显示页名
   net: { enabled: true, pingHost: '223.5.5.5' },          // 网速+延迟采集
@@ -38,9 +38,10 @@ const DEFAULT_CONFIG = {
   calendar: { icsUrl: '' },         // 日程 ICS 订阅地址
   disk: { enabled: true },          // 磁盘空间/温度
   notify: { enabled: false },       // 手机通知监听(需 Windows 授权通知访问, 默认关)
-  mouseGuard: { enabled: false, games: ['cs2', 'csgo', 'valorant', 'cf', 'crossfire', 'r5apex'] },   // 鼠标护栏; games=全屏时收紧围栏到游戏屏的进程名(游戏锁屏); UI 待副屏设计定稿后接 /api/mouseguard
+  mouseGuard: { enabled: false, games: ['cs2', 'csgo', 'valorant', 'cf', 'crossfire', 'r5apex'] },   // 鼠标围栏; games=全屏时收紧围栏到游戏屏的进程名
+  dashboardWindow: { topmost: true }, // 两块仪表盘窗口共用置顶开关；启动脚本也读取此设置
   health: { url: '' },              // 服务器健康检查地址(宽副屏右侧小卡), 空=不检查
-  audio: { favorites: ['ADAM', 'Realtek'] },   // 宽副屏输出快切列表: 设备名包含这些关键字才显示(Kevin: 只要 ADAM D3V + Realtek)
+  audio: { favorites: ['Realtek'] },   // 按本机输出设备名称设置筛选关键字
   apps: [                            // 宽副屏操控台·应用启动器(cmd 经 "start" 执行, 支持 exe 名/完整路径/协议)
     { id: 'edge',    label: 'Edge',   cmd: 'msedge',            color: '#0ea5e9', ch: 'e' },
     { id: 'vscode',  label: 'VS Code', cmd: 'code',             color: '#3b82f6', ch: '</>' },
@@ -64,7 +65,7 @@ const DEFAULT_CONFIG = {
       { id: 'q1', type: 'pet',   w: 2, h: 2 },
       { id: 'q2', type: 'usage', w: 2, h: 2 },
       { id: 'q3', type: 'clock', w: 2, h: 2 },
-      { id: 'q4', type: 'text',  w: 2, h: 2, title: '提示', content: '在管理页自定义这块面板\nhttp://192.168.1.3:3777/admin' },
+      { id: 'q4', type: 'text',  w: 2, h: 2, title: '提示', content: '在管理页自定义这块面板\nhttp://localhost:3777/admin' },
     ]},
   ],
 };
@@ -186,17 +187,25 @@ function pushHist() {
 }
 
 setInterval(sampleCpuRam, 2000);
-setInterval(sampleGpu, 2000);
+// nvidia-smi is a short-lived process, so a 2s cadence caused needless process churn.
+// Ten seconds is still responsive enough for a dashboard while cutting launches by 80%.
+setInterval(sampleGpu, 10000);
 setInterval(pushHist, 5000);
 sampleCpuRam(); sampleGpu();
 
-// 磁盘 I/O + 进程数: 长驻 perf-extra.ps1 每 2s 一行 {diskRead,diskWrite,procs}
+// 磁盘 I/O + 进程数: 用系统自带的原生 typeperf 常驻采样。
+// 只查询 PhysicalDisk(0*)，明确绕开 H:/I: 两个无介质 USB 读卡器；不再启动 80+MB 的 PowerShell，
+// 也不再使用会枚举所有磁盘的 PhysicalDisk(_Total)。
 let perfChild = null;
 function spawnPerfExtra() {
   if (perfChild) return;
-  const f = path.join(__dirname, 'perf-extra.ps1');
-  if (!fs.existsSync(f)) return;
-  const child = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', f], { windowsHide: true });
+  const typeperf = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'typeperf.exe');
+  const child = spawn(typeperf, [
+    '\\PhysicalDisk(0*)\\Disk Read Bytes/sec',
+    '\\PhysicalDisk(0*)\\Disk Write Bytes/sec',
+    '\\System\\Processes',
+    '-si', '5',
+  ], { windowsHide: true });
   perfChild = child;
   let buf = '';
   child.stdout.on('data', d => {
@@ -204,16 +213,19 @@ function spawnPerfExtra() {
     let i;
     while ((i = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
-      if (!line.startsWith('{')) continue;
-      try {
-        const m = JSON.parse(line);
-        state.io.read = m.diskRead || 0; state.io.write = m.diskWrite || 0; state.io.ok = true;
-        if (m.procs != null) state.sys.procs = m.procs;
-      } catch {}
+      if (!line.startsWith('"') || line.includes('(PDH-CSV')) continue;
+      const cols = Array.from(line.matchAll(/"([^"]*)"/g), m => m[1]);
+      if (cols.length < 4) continue;
+      const read = Number(cols[1]), write = Number(cols[2]), procs = Number(cols[3]);
+      if (!Number.isFinite(read) || !Number.isFinite(write)) continue;
+      state.io.read = Math.max(0, read);
+      state.io.write = Math.max(0, write);
+      state.io.ok = true;
+      if (Number.isFinite(procs)) state.sys.procs = Math.max(0, Math.round(procs));
     }
   });
-  child.on('exit', () => { perfChild = null; state.io.ok = false; setTimeout(spawnPerfExtra, 8000); });
-  child.on('error', () => { perfChild = null; });
+  child.on('exit', () => { perfChild = null; state.io.ok = false; setTimeout(spawnPerfExtra, 15000); });
+  child.on('error', () => { perfChild = null; state.io.ok = false; });
 }
 spawnPerfExtra();
 
@@ -242,6 +254,71 @@ function readHookFile() {
 
 // 远程设备 (如 Mac) 通过 POST /api/activity-report 上报, 与本机 hooks 同权合并
 const remoteDevices = {};   // name -> { state, tool, notice, ts }
+/* 远程「每会话」快照: 本机会话是一个 sid 一个文件, 远程没有文件系统可读 -> 在内存里按 设备|会话 攒。
+   有了它, Mac 上的对话才能和本机对话一样一张张列在会话页上, 而不是只并成设备的一个总状态。
+   注意远程事件多半是脱敏的(detail/notice/cwd 为空, sid 是哈希), 只当状态骨架用。 */
+const remoteSessions = new Map();   // "设备|sid" -> { device, sid, state, kind, tool, detail, notice, cwd, ts }
+
+/* 远程事件转发进 supervisor 总线(127.0.0.1:3778)。
+   为什么走这条路而不是让 Mac 直连 3778: supervisor 只绑回环, 远程连不上; 而把它绑到网上就等于
+   把「启停服务」那些控制接口一起暴露出去。所以入口放在本来就对网开放的副屏这边, 收到再从
+   localhost 投进总线 —— 不增加任何对外暴露面, supervisor 挂了也只是没历史, 副屏照常显示。
+   fire-and-forget: 转发失败绝不影响副屏自己的显示。 */
+const BUS_URL = { host: '127.0.0.1', port: 3778, path: '/api/bus/ingest' };
+function forwardToBus(evt) {
+  try {
+    const data = Buffer.from(JSON.stringify(evt), 'utf8');
+    const r = http.request({
+      host: BUS_URL.host, port: BUS_URL.port, path: BUS_URL.path, method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': data.length },
+    }, res => res.resume());
+    r.on('error', () => {});                       // supervisor 没起就静默跳过
+    r.setTimeout(1500, () => { try { r.destroy(); } catch {} });
+    r.end(data);
+  } catch { /* 忽略 */ }
+}
+
+/* 设备在线状态: 以 supervisor 总线为准(它是汇总所有设备事件的那一层)。
+   每 10s 拉一次缓存; supervisor 不可达就退回副屏自己算的那份, 并在响应里标明 source,
+   免得面板显示了却不知道这数字是谁给的。 */
+let busDevices = { list: null, at: 0 };
+function pollBusDevices() {
+  try {
+    const r = http.request({ host: BUS_URL.host, port: BUS_URL.port, path: '/api/devices', method: 'GET' }, res => {
+      let d = '';
+      res.on('data', c => (d += c));
+      res.on('end', () => {
+        try { const j = JSON.parse(d); if (Array.isArray(j)) busDevices = { list: j, at: Date.now() }; }
+        catch { /* 忽略 */ }
+      });
+    });
+    r.on('error', () => { busDevices = { list: null, at: Date.now() }; });
+    r.setTimeout(1500, () => { try { r.destroy(); } catch {} });
+    r.end();
+  } catch { /* 忽略 */ }
+}
+setInterval(pollBusDevices, 10 * 1000);
+setTimeout(pollBusDevices, 3000);
+const REMOTE_SESS_MAX = 200;        // 上限兜底, 防异常上报把内存撑爆
+function remoteSessionPut(device, sid, s, cwd, name, reply) {
+  if (!sid) return;
+  const key = device + '|' + sid;
+  const prev = remoteSessions.get(key);
+  remoteSessions.set(key, {
+    device, sid: String(sid),
+    state: s.state, kind: s.kind || null, tool: s.tool || null,
+    detail: s.detail || null, notice: s.notice || null, cwd: cwd || null,
+    // 会话名/最后回复: 上报方脱敏时可能不带, 或这一刻转录里还没有文字回复(全是工具输出) ->
+    // 沿用这个会话上次报过的, 别让卡片上的名字和回复忽有忽无(PC 那边 lastReplyFor 也是这个 sticky 策略)
+    name: name || (prev && prev.name) || null,
+    reply: reply || (prev && prev.reply) || null,
+    ts: Date.now(),
+  });
+  if (remoteSessions.size > REMOTE_SESS_MAX) {   // 淘汰最旧的
+    const oldest = [...remoteSessions.entries()].sort((a, b) => a[1].ts - b[1].ts)[0];
+    if (oldest) remoteSessions.delete(oldest[0]);
+  }
+}
 
 // 与 hook.js 相同的事件->状态映射 (远程端直接发原始 hook JSON)
 const NEEDS_YOU = new Set(['permission_prompt', 'agent_needs_input', 'elicitation_dialog']);
@@ -412,6 +489,22 @@ computeActivity();
 // hook.js 给每个会话写 ~/.claude/sidescreen-activity/<sid>.json (最新事件快照);
 // "最后一条回复"从 ~/.claude/projects/<cwd转目录名>/<sid>.jsonl 转录尾部提取。
 // 只读, 不删不写任何 ~/.claude 下的文件(桌宠共用这套快照)。
+// 本机会话卡上显示的设备名(远程设备名由上报方自己带)。想改叫法就在 config.json 里写 device.local
+const LOCAL_DEVICE = (config.device && config.device.local) || 'PC';
+/* 「刚才在干什么」记忆: hook 的 detail(读 xx / 改 xx / $ 命令)只在 PreToolUse 那一下有,
+   工具一跑完就变 thinking、detail 归空。只显示当下的话, 大部分时间就剩一句"思考中…"。
+   所以在服务端按会话记住最后一个非空动作, 供卡片回填 —— 纯内存, 重启即忘, 不落盘。 */
+const lastActMemo = new Map();   // key(设备|sid) -> { act, ts }
+function lastActRemember(key, detail, tool) {
+  const act = detail || (tool ? '用 ' + tool : null);
+  if (!act) return;
+  lastActMemo.set(key, { act, ts: Date.now() });
+  if (lastActMemo.size > 300) {   // 兜底清理: 丢掉半小时以上没动的
+    const cut = Date.now() - 30 * 60 * 1000;
+    for (const [k, v] of lastActMemo) if (v.ts < cut) lastActMemo.delete(k);
+  }
+}
+function lastActOf(key) { const v = lastActMemo.get(key); return v ? v.act : null; }
 const SESS_DIR = path.join(os.homedir(), '.claude', 'sidescreen-activity');
 const PROJ_DIR = path.join(os.homedir(), '.claude', 'projects');
 const SESS_ACTIVE_MS = 30 * 60 * 1000;
@@ -550,8 +643,12 @@ function getClaudeSessions(debug) {
     else if (d.state === 'tool' && age < 10 * 60 * 1000) status = 'running';
     else if (d.state === 'thinking' && age < 3 * 60 * 1000) status = 'running';
     else status = 'done';
+    const memoKey = LOCAL_DEVICE + '|' + sid;
+    lastActRemember(memoKey, d.detail, d.tool);
     raw.push({
       sid: sid.slice(0, 8), fullSid: sid, cwd: d.cwd || '',
+      device: LOCAL_DEVICE,                  // 本机会话; 远程的在下面追加
+      lastAct: lastActOf(memoKey),           // 工具跑完 detail 会空 -> 卡片用这个回填"刚做完什么"
       proj: d.cwd ? String(d.cwd).replace(/[\\/]+$/, '').split(/[\\/]/).pop() : '未知项目',
       title: (info && info.title) || null,   // 会话名(如"副屏设计"), 没有就让前端退回项目名
       status, state: d.state,
@@ -561,16 +658,42 @@ function getClaudeSessions(debug) {
       age, dropOf: null,
     });
   }
+  /* 远程设备(Mac 等)的会话: 没有转录可读, 只能按 hook 事件年龄近似 —— 与本机的第③档同一套规则。
+     标题/正文多半被源头脱敏掉了, 那就用「设备 + 短 sid」当名字, 至少能区分是哪一台的哪个对话。 */
+  for (const r of remoteSessions.values()) {
+    const age = now - r.ts;
+    if (age > SESS_ACTIVE_MS) continue;                  // 与本机同一条活跃线: 30 分钟
+    let status;
+    if (r.state === 'permission') status = 'waiting';
+    else if (r.state === 'done' || r.state === 'idle') status = 'done';
+    else if (r.state === 'tool' && age < 10 * 60 * 1000) status = 'running';
+    else if (r.state === 'thinking' && age < 3 * 60 * 1000) status = 'running';
+    else status = 'done';
+    const short = r.sid.slice(0, 8);
+    const memoKey = r.device + '|' + r.sid;
+    lastActRemember(memoKey, r.detail, r.tool);
+    raw.push({
+      sid: short, fullSid: r.device + ':' + r.sid, cwd: r.cwd || '',
+      device: r.device,
+      lastAct: lastActOf(memoKey),
+      proj: r.cwd ? String(r.cwd).replace(/[\\/]+$/, '').split(/[\\/]/).pop() : (r.device + ' 会话'),
+      title: r.name || null,   // 远程报上来的会话名/别名; 没有就让前端退回 proj
+      status, state: r.state, kind: r.kind || null,
+      tool: r.tool || null, detail: r.detail || null, notice: r.notice || null,
+      ts: r.ts, reply: r.reply || null, age, dropOf: null,
+    });
+  }
   // 归并 resume 链: 桌面/CLI 续聊会派生新 session_id 但继承同一标题, 造成同名会话多张卡。
   // 同一 title 只保留 ts 最新的那张(旧的自动消失); 无 title 的用 fullSid 作键, 不归并。
+  // 键上带设备: 两台机器各开一个同名会话是两回事, 别归并成一张卡。
   const best = new Map();
   for (const r of raw) {
-    const key = r.title ? 'T:' + r.title : 'S:' + r.fullSid;
+    const key = r.device + (r.title ? '|T:' + r.title : '|S:' + r.fullSid);
     const cur = best.get(key);
     if (!cur || r.ts > cur.ts) best.set(key, r);
   }
   for (const r of raw) {
-    const win = best.get(r.title ? 'T:' + r.title : 'S:' + r.fullSid);
+    const win = best.get(r.device + (r.title ? '|T:' + r.title : '|S:' + r.fullSid));
     if (win !== r) r.dropOf = win.sid;   // 被并入了哪张(仅日志用)
   }
   const out = raw.filter(r => !r.dropOf);
@@ -578,24 +701,29 @@ function getClaudeSessions(debug) {
   out.sort((a, b) => rank[a.status] - rank[b.status] || b.ts - a.ts);
   const counts = { total: out.length, running: 0, waiting: 0, done: 0 };
   for (const s of out) counts[s.status]++;
+  // 按设备分组的条数: 给前端做「PC 2 · Mac 1」这种小计, 一眼看出哪台在忙
+  const byDevice = {};
+  for (const s of out) {
+    const d = (byDevice[s.device] = byDevice[s.device] || { total: 0, running: 0, waiting: 0, done: 0 });
+    d.total++; d[s.status]++;
+  }
   sessLog(raw, out.length);
-  const view = { counts, sessions: out.slice(0, 8), t: now };
-  if (debug) view.raw = raw.map(r => ({ sid: r.sid, title: r.title, proj: r.proj, state: r.state, kind: r.kind, ageSec: Math.round(r.age / 1000), status: r.status, dropOf: r.dropOf }));
+  const view = { counts, byDevice, sessions: out.slice(0, 8), t: now };
+  if (debug) view.raw = raw.map(r => ({ sid: r.sid, device: r.device, title: r.title, proj: r.proj, state: r.state, kind: r.kind, ageSec: Math.round(r.age / 1000), status: r.status, dropOf: r.dropOf }));
   return view;
 }
 
-// ---------------- Claude 官方额度 (oauth/usage, 经本地代理) ----------------
-// 读 ~/.claude/.credentials.json 的令牌, 通过本地代理调官方接口(GET, 只读查用量), 拿全三条。
-// 【只读】不刷新、不写凭据、不伪装 UA。令牌过期就报状态、等你在终端 /login 把新令牌写回本文件。
+// ---------------- Codex 官方额度 (App Server JSON-RPC) ----------------
+// 真实采集走 codex-usage.js 的 account/rateLimits/read + account/usage/read。
+// 副屏不读取、不记录、不写入 Codex 的认证文件；登录态与刷新由 Codex 官方进程自行管理。
 
 const usage = {
-  data: null,        // { session, weekAll, weekScoped } 各含 {pct, resetsAt, severity, label?}
+  data: null,        // Codex 动态额度桶 + token 活动摘要
   fetchedAt: null,
   error: null,
   inFlight: false,
   nextTryAt: 0,
-  backoffMs: 15 * 60 * 1000,   // usage 接口对频率敏感, 429 后退避从 15 分钟起
-  expiredSince: 0,             // 令牌首次被发现过期的时刻(用于宽限期)
+  backoffMs: 60 * 1000,
 };
 
 
@@ -620,109 +748,14 @@ function proxyAgent() {
   return agent;
 }
 
-function apiRequest(method, urlStr, headers, bodyObj) {
-  return new Promise((resolve, reject) => {
-    const u = new URL(urlStr);
-    const payload = bodyObj ? JSON.stringify(bodyObj) : null;
-    const req = https.request({
-      hostname: u.hostname, path: u.pathname + u.search, method,
-      agent: proxyAgent(),
-      // 不再伪装成 claude-code 客户端: 实测 oauth/usage 只读查询不带 UA 也照样 200(用户要求, 2026-07-23)
-      headers: Object.assign(
-        { 'Content-Type': 'application/json' },
-        payload ? { 'Content-Length': Buffer.byteLength(payload) } : {},
-        headers
-      ),
-      timeout: 25000,
-    }, res => {
-      let data = '';
-      res.on('data', c => (data += c));
-      res.on('end', () => {
-        let json = null;
-        try { json = JSON.parse(data); } catch { /* 保留原文 */ }
-        resolve({ status: res.statusCode, json, text: data });
-      });
-    });
-    req.on('error', reject);
-    req.on('timeout', () => req.destroy(new Error('请求超时')));
-    if (payload) req.write(payload);
-    req.end();
-  });
-}
-
-// 凭据只读。writeCreds 已删 —— 副屏现在一个字节都不往 .credentials.json 里写。
-function readCreds() { return JSON.parse(fs.readFileSync(CRED_FILE, 'utf8').replace(/^﻿/, '')); }
-
-/* 令牌大事记: 单独一个小日志, 不跟着重启被冲掉 —— 到底是谁在维护 .credentials.json
-   (桌面应用? 终端 CLI? 还是只有本服务?) 靠它攒出证据。只记时间和结果, 不记令牌内容。 */
-const TOKEN_LOG = path.join(__dirname, 'token-renew.log');
-function tokenLog(msg) {
-  const line = `[${new Date().toLocaleString()}] ${msg}\n`;
-  console.log('[token]', msg);
-  try {
-    fs.appendFileSync(TOKEN_LOG, line);
-    const st = fs.statSync(TOKEN_LOG);
-    if (st.size > 131072) { const b = fs.readFileSync(TOKEN_LOG); fs.writeFileSync(TOKEN_LOG, b.slice(b.length - 65536)); }
-  } catch { /* 记不上不影响主流程 */ }
-}
-/* 盯着凭据文件被谁改: 每 5 分钟看一次 mtime。副屏自己已经不写这个文件了, 所以它一变
-   就必定是外面(桌面应用 / 终端 CLI / 你手动 login)干的 —— 这正是"到底谁在维护这份凭据"的直接证据。
-   只看 mtime 和到期时间, 不碰令牌本身。 */
-let lastCredMtime = 0;
-function credWatchTick() {
-  let m = 0; try { m = fs.statSync(CRED_FILE).mtimeMs; } catch { return; }
-  if (!lastCredMtime) { lastCredMtime = m; return; }
-  if (m === lastCredMtime) return;
-  lastCredMtime = m;
-  let left = '?';
-  try { left = Math.round((readCreds().claudeAiOauth.expiresAt - Date.now()) / 60000) + ' 分钟'; } catch {}
-  tokenLog(`凭据被外部改写(桌面应用 / 终端 CLI / 手动 login), 新令牌还剩 ${left}`);
-}
-setInterval(credWatchTick, 5 * 60 * 1000);
-setTimeout(credWatchTick, 10 * 1000);
-
-/* 令牌: 只读, 不刷新、不写回。
-   删掉的两条路(2026-07-23, 用户拍板):
-   ① 自刷: 拿 refresh_token 打 platform.claude.com/v1/oauth/token, 还套 claude-code 的 User-Agent
-      —— 仿冒官方客户端, 已经因此吃过 429; 直接删。
-   ② 起终端 CLI 兜底(auth status / -p / auth login): 用户平时只用桌面应用, 不要副屏去拉起 CLI。
-   现在令牌过期就老老实实报错、等人工在终端 `claude` 里 /login(那一下会把新令牌写回本文件)。 */
-async function ensureToken() {
-  const oa = readCreds().claudeAiOauth;   // 每次都重读文件: 外面刚登录过, 这里直接拿到新令牌
-  if (!oa) throw new Error('credentials.json 无 claudeAiOauth (需在终端 /login)');
-  if (oa.expiresAt - Date.now() > 3 * 60 * 1000) { usage.expiredSince = 0; return oa.accessToken; }
-  if (!usage.expiredSince) usage.expiredSince = Date.now();
-  const e = new Error('令牌已过期, 需在终端跑 claude 再 /login');
-  e.soft = true;   // 不进长退避: 每分钟重读文件, 你一登录副屏立刻自己恢复
-  throw e;
-}
-
-// 从响应的 limits 数组取三条 (最干净的来源)
-function mapUsage(j) {
-  const iso = s => (s ? Date.parse(s) : null);
-  const pick = pred => (j.limits || []).find(pred);
-  const norm = l => l ? { pct: l.percent, resetsAt: iso(l.resets_at), severity: l.severity } : null;
-  const session = norm(pick(l => l.kind === 'session'));
-  const weekAll = norm(pick(l => l.kind === 'weekly_all'));
-  const scopedL = pick(l => l.kind === 'weekly_scoped');
-  const weekScoped = scopedL
-    ? Object.assign(norm(scopedL), { label: scopedL.scope && scopedL.scope.model && scopedL.scope.model.display_name })
-    : null;
-  return { session, weekAll, weekScoped };
-}
-
-function fileTokenValid() {
-  try { const oa = readCreds().claudeAiOauth; return !!oa && oa.expiresAt - Date.now() > 3 * 60 * 1000; }
-  catch { return false; }
-}
-
-// ---------------- 额度历史落盘 (usage-history.jsonl) ----------------
-// 每次成功拉到额度就采一个点 {t, s:会话%, w:周%, o:Opus%}; 数值没变且间隔<5分钟就跳过。
-// 【永久保留, 只留本机】实测约 185 点/天、40 字节/点 -> 2.6 MB/年, 十年也才 26 MB, 没有淘汰的必要。
+// ---------------- Codex 额度历史落盘 (codex-usage-history.jsonl) ----------------
+// 每次成功拉到额度就采一个点 {t,b:{额度桶key:百分比},r:{额度桶key:重置时间}}；
+// 动态桶结构兼容未来新增短周期额度或模型专属额度。按成功轮询逐分钟保存，即使百分比没变也保留时间密度。
+// 【永久保留, 只留本机】当前双额度桶约 150 字节/分钟，约 75 MB/年；原始记录不淘汰，长范围只在接口出图时抽稀。
 // 只追加、从不重写整表: 重写一旦中途崩/断电就等于把历史截断了, 追加没有这个风险。
 // 另做每日冷备(.bak), 且只在源不比备份小时才覆盖 —— 绝不用一个更小的文件盖掉好备份。
 // 文件已在 .gitignore 里, 不会跟着公开仓库出去。
-const USAGE_HIST_FILE = path.join(__dirname, 'usage-history.jsonl');
+const USAGE_HIST_FILE = path.join(__dirname, 'codex-usage-history.jsonl');
 const USAGE_HIST_BAK = USAGE_HIST_FILE + '.bak';
 let usageHist = [];
 try {
@@ -752,7 +785,7 @@ function usageHistBytes() {
 const USAGE_HIST_MAX_POINTS = 4000;
 function thinHist(pts, maxN) {
   if (pts.length <= maxN) return pts;
-  const hi = p => Math.max(p.s || 0, p.w || 0, p.o || 0);
+  const hi = p => Math.max(0, ...Object.values(p.b || {}).map(Number).filter(Number.isFinite));
   const t0 = pts[0].t, span = (pts[pts.length - 1].t - t0) || 1, bw = span / maxN;
   const out = [];
   let bi = -1, best = null;
@@ -768,16 +801,19 @@ function thinHist(pts, maxN) {
   return out;
 }
 function usageHistAppend(d) {
-  if (!d) return;
+  if (!d || !Array.isArray(d.buckets)) return;
   const r1 = v => (v == null ? null : Math.round(v * 10) / 10);
-  const p = {
-    t: Date.now(),
-    s: d.session ? r1(d.session.pct) : null,
-    w: d.weekAll ? r1(d.weekAll.pct) : null,
-    o: d.weekScoped ? r1(d.weekScoped.pct) : null,
-  };
+  const p = { t: Date.now(), b: {}, r: {} };
+  for (const x of d.buckets) {
+    if (!x || !x.key) continue;
+    p.b[x.key] = r1(x.pct);
+    p.r[x.key] = x.resetsAt || null;
+  }
   const last = usageHist[usageHist.length - 1];
-  if (last && p.t - last.t < 5 * 60 * 1000 && last.s === p.s && last.w === p.w && last.o === p.o) return;
+  // 只防同一次轮询被意外并发写两遍；正常的一分钟采样即使数值相同也照样落盘。
+  if (last && p.t - last.t < 45 * 1000 &&
+      JSON.stringify(last.b || {}) === JSON.stringify(p.b) &&
+      JSON.stringify(last.r || {}) === JSON.stringify(p.r)) return;
   usageHist.push(p);
   try { fs.appendFileSync(USAGE_HIST_FILE, JSON.stringify(p) + '\n'); } catch (e) { console.log('[usage] 历史写盘失败:', e.message); }
   // 这里从前有个"每 500 点重写文件裁掉 30 天外"的分支, 已删: 永久保留 = 只追加, 不重写。
@@ -785,60 +821,29 @@ function usageHistAppend(d) {
 
 async function fetchUsage() {
   if (usage.inFlight) return;
-  // 退避期内正常跳过; 但若之前是卡在「等令牌」而现在文件里已有 CLI 刷新出的有效令牌, 立即恢复不再空等
-  if (Date.now() < usage.nextTryAt && !(usage.expiredSince && fileTokenValid())) return;
+  if (Date.now() < usage.nextTryAt) return;
   usage.inFlight = true;
   try {
-    const token = await ensureToken();
-    const r = await apiRequest('GET', 'https://api.anthropic.com/api/oauth/usage', {
-      Authorization: `Bearer ${token}`, 'anthropic-beta': 'oauth-2025-04-20',
-    });
-    if (r.status === 200 && r.json) {
-      usage.data = mapUsage(r.json);
-      usage.limits = r.json.limits || [];   // 保留接口原样的全部限额条目(详情弹层用, 不止三条)
-      usage.fetchedAt = Date.now();
-      usage.error = null;
-      usageHistAppend(usage.data);
-      usage.backoffMs = 15 * 60 * 1000;
-      const ivMin = Math.max(1, (config.usage && config.usage.intervalMin) || 1);   // 管理台可调, 下限 1 分钟
-      usage.nextTryAt = Date.now() + ivMin * 60 * 1000 - 5000;   // 成功后按配置间隔(留 5s 余量迎合 60s tick)
-    } else if (r.status === 401) {
-      // 令牌失效。以前这里会把文件里的 expiresAt 清零去催刷新 —— 现在副屏一个字节都不写凭据文件, 只报状态。
-      usage.expiredSince = usage.expiredSince || Date.now();
-      usage.error = '令牌失效, 需在终端跑 claude 再 /login';
-      usage.nextTryAt = Date.now() + 60 * 1000;   // 每分钟重读文件, 你一登录就自己好
-    } else {
-      const mins = Math.round(usage.backoffMs / 60000);
-      usage.error = r.status === 429 ? `接口限流冷却中，${mins} 分钟后重试` : `HTTP ${r.status}`;
-      usage.nextTryAt = Date.now() + usage.backoffMs;
-      usage.backoffMs = Math.min(usage.backoffMs * 2, 30 * 60 * 1000);
-      console.log('[usage] HTTP', r.status, (r.text || '').slice(0, 200));
-    }
+    const data = await readCodexAccountUsage();
+    usage.data = data;
+    usage.limits = data.buckets || [];
+    usage.fetchedAt = Date.now();
+    usage.error = null;
+    usageHistAppend(data);
+    usage.backoffMs = 60 * 1000;
+    const ivMin = Math.max(1, (config.usage && config.usage.intervalMin) || 1);
+    usage.nextTryAt = Date.now() + ivMin * 60 * 1000 - 5000;
   } catch (e) {
-    // 瞬时网络/代理抖动(TLS 断开/超时/socket reset/代理 CONNECT 失败): 代理切节点那一下会这样, 网络马上就好 -> 30s 就重试, 不进长退避
-    const transient = /socket|TLS|ECONN|ETIMEDOUT|EPIPE|超时|代理|hang up|disconnected|network/i.test(e.message || '');
-    usage.error = transient ? '网络抖动, 重试中…' : e.message;
-    if (e.soft) {
-      // 只是在等 CLI 刷新令牌: 60s 后重读文件, 不要长退避
-      usage.nextTryAt = Date.now() + 60 * 1000;
-    } else if (transient) {
-      usage.nextTryAt = Date.now() + 30 * 1000;   // 网络抖动: 快速重试
-    } else if (e.rateLimited) {
-      // 刷新被官方限流: 退避从 30 分钟起, 期间仍会每分钟重读文件(若 CLI 刷了就直接恢复)
-      usage.nextTryAt = Date.now() + Math.max(usage.backoffMs, 30 * 60 * 1000);
-      usage.backoffMs = Math.min(Math.max(usage.backoffMs, 30 * 60 * 1000) * 2, 60 * 60 * 1000);
-    } else {
-      usage.nextTryAt = Date.now() + usage.backoffMs;
-      usage.backoffMs = Math.min(usage.backoffMs * 2, 30 * 60 * 1000);
-    }
-    console.log('[usage] error:', e.message, transient ? '(瞬时, 30s 重试)' : '');
+    usage.error = e.message || 'Codex 用量读取失败';
+    usage.nextTryAt = Date.now() + usage.backoffMs;
+    usage.backoffMs = Math.min(usage.backoffMs * 2, 10 * 60 * 1000);
+    console.log('[codex-usage] error:', usage.error);
   } finally {
     usage.inFlight = false;
   }
 }
-// 首次延迟 90s 启动, 给之前触发的限流冷却时间; 之后每 5 分钟一次
-// 每 60s 触发一次, 真正的网络调用频率由 nextTryAt 退避控制(成功后 15 分钟一次, 等令牌时 60s 一次)
-setTimeout(() => { fetchUsage(); setInterval(fetchUsage, 60 * 1000); }, 90 * 1000);
+// 启动后快速取首帧；之后每分钟检查一次，实际频率由 intervalMin/错误退避控制。
+setTimeout(() => { fetchUsage(); setInterval(fetchUsage, 60 * 1000); }, 2500);
 
 // ---------------- 正在播放 + 歌词 (SMTC + lrclib) ----------------
 // nowplaying.ps1 读系统媒体信息; 歌词从 lrclib.net(社区歌词库)实时查, 仅本地显示, 不落盘不缓存到磁盘。
@@ -1144,22 +1149,29 @@ function spawnNotify() {
 }
 if (config.notify && config.notify.enabled) spawnNotify();
 
-// --- 磁盘: 每 60s 一次性跑 disk-info.ps1 ---
+// --- 磁盘空间: Node 原生 statfs，每 5 分钟读取系统盘和本项目所在盘 ---
+// 不再每分钟启动 PowerShell/CIM-RPC 查询，也永远不探测 H:/I: 无介质读卡器。
 function pollDisk() {
   if (config.disk && config.disk.enabled === false) return;
-  const f = path.join(__dirname, 'disk-info.ps1');
-  if (!fs.existsSync(f)) return;
-  execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', f], { timeout: 10000 }, (err, out) => {
-    if (err || !out) return;
-    try {
-      const lines = out.trim().split('\n').filter(l => l.trim().startsWith('{'));
-      const j = JSON.parse(lines[lines.length - 1]);
-      extras.disk = { ok: true, drives: j.drives || [], temps: j.temps || [], at: Date.now() };
-    } catch {}
-  });
+  const roots = Array.from(new Set([
+    path.parse(process.env.SystemRoot || 'C:\\Windows').root,
+    path.parse(__dirname).root,
+  ].filter(Boolean)));
+  Promise.all(roots.map(root => new Promise(resolve => {
+    fs.statfs(root, (err, s) => {
+      if (err || !s || !s.blocks || !s.bsize) return resolve(null);
+      resolve({
+        letter: root.replace(/[\\/:]/g, '').toUpperCase(),
+        freeGB: Number((s.bavail * s.bsize / 2 ** 30).toFixed(1)),
+        totalGB: Number((s.blocks * s.bsize / 2 ** 30).toFixed(1)),
+      });
+    });
+  }))).then(drives => {
+    extras.disk = { ok: true, drives: drives.filter(Boolean), temps: [], at: Date.now() };
+  }).catch(() => {});
 }
 setTimeout(pollDisk, 5000);
-setInterval(pollDisk, 60 * 1000);
+setInterval(pollDisk, 5 * 60 * 1000);
 
 // --- 天气: Open-Meteo, 每 20 分钟 ---
 let weatherLib = null;
@@ -1385,6 +1397,7 @@ const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript', '.css': 'text/css',
   '.svg': 'image/svg+xml', '.json': 'application/json', '.gif': 'image/gif',
   '.png': 'image/png', '.webm': 'video/webm',
+  '.sh': 'text/plain; charset=utf-8',   // Mac 接入脚本 public/mac/install.sh, 给 curl 下载用
 };
 
 function json(res, code, obj) {
@@ -1422,23 +1435,46 @@ function setAutostart(on, cb) {
 }
 
 // ---------------- 鼠标护栏 (mouse-guard.ps1) ----------------
-// 状态=实时查真进程(桌面快捷方式也能切, 不能靠记忆值)。UI 未接(副屏设计中), 接口先备好:
+// 状态由守卫每 5s 写一次极小心跳；不再为每次 API 请求启动 PowerShell/WMI 查询进程。
 //   GET  /api/mouseguard          -> { running, enabled }
 //   POST /api/mouseguard {on}     -> 开/关并持久化 config.mouseGuard.enabled
 const GUARD_SCRIPT = path.join(__dirname, 'mouse-guard.ps1');
+const GUARD_STATE_FILE = path.join(__dirname, 'mouse-guard.state.json');
+const GUARD_HEARTBEAT_MAX_MS = 15000;
 function queryMouseGuard(cb) {
-  // 自匹配陷阱: 查询命令行里也含 "mouse-guard" 字样, 用 "-File <空白>" 前缀精确匹配真进程
-  const ps = "(Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -match '-File\\s+\\S*mouse-guard\\.ps1' } | Measure-Object).Count";
-  execFile('powershell', ['-NoProfile', '-Command', ps], (err, out) => cb(!err && parseInt(out, 10) > 0));
+  let s = null;
+  try { s = JSON.parse(fs.readFileSync(GUARD_STATE_FILE, 'utf8')); } catch {}
+  const age = s && Number.isFinite(Number(s.ts)) ? Date.now() - Number(s.ts) : Infinity;
+  const running = !!(s && s.state !== 'off' && age >= 0 && age <= GUARD_HEARTBEAT_MAX_MS);
+  cb(running, s);
 }
 function setMouseGuard(on, cb) {
   if (!fs.existsSync(GUARD_SCRIPT)) return cb(new Error('mouse-guard.ps1 missing'));
-  if (!on) { execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', GUARD_SCRIPT, '-Mode', 'off'], () => cb(null)); return; }
+  if (!on) { execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', GUARD_SCRIPT, '-Mode', 'off'], { windowsHide: true, timeout: 10000 }, err => cb(err)); return; }
   // 开: 经 Start-Process 二段启动成独立常驻进程(node 直接 spawn 会秒死, 实测; -Mode on 已有实例时静默退出不重复)
   const psCmd = `Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-File','${GUARD_SCRIPT}','-Mode','on' -WindowStyle Hidden`;
-  execFile('powershell', ['-NoProfile', '-Command', psCmd], () => cb(null));
+  execFile('powershell', ['-NoProfile', '-Command', psCmd], { windowsHide: true, timeout: 10000 }, err => cb(err));
 }
 if (config.mouseGuard && config.mouseGuard.enabled) setTimeout(() => setMouseGuard(true, () => {}), 3000);
+
+// Cache native window reads briefly so each dashboard page does not spawn its own query.
+let topmostCache = null, topmostRead = null, topmostBusy = false;
+function runTopmost(mode) {
+  return new Promise((resolve, reject) => {
+    execFile('powershell', ['-NoProfile', '-File', path.join(__dirname, 'dashboard-topmost.ps1'), '-Mode', mode],
+      { windowsHide: true, timeout: 10000, encoding: 'utf8' }, (err, out) => {
+        if (err) return reject(err);
+        try { resolve(JSON.parse(out.replace(/^\uFEFF/, '').trim())); } catch (e) { reject(e); }
+      });
+  });
+}
+async function readTopmost() {
+  if (topmostCache && Date.now() - topmostCache.at < 10000) return topmostCache.value;
+  if (!topmostRead) topmostRead = runTopmost('query').then(value => {
+    topmostCache = { value, at: Date.now() }; return value;
+  }).finally(() => { topmostRead = null; });
+  return topmostRead;
+}
 
 function lanIP() {
   const nets = os.networkInterfaces();
@@ -1463,12 +1499,16 @@ const server = http.createServer(async (req, res) => {
     }));
     return;
   }
+  if (u.pathname === '/api/codex') {
+    return json(res, 200, {
+      usage: usage.data, fetchedAt: usage.fetchedAt, error: usage.error,
+    });
+  }
   if (u.pathname === '/api/claude') {
-    let tokenExpiresAt = null;
-    try { tokenExpiresAt = readCreds().claudeAiOauth.expiresAt; } catch { /* 无凭据 */ }
+    // 兼容小副屏旧调用: 会话活动仍在这里，额度已经来自 Codex App Server。
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
-      usage: usage.data, fetchedAt: usage.fetchedAt, error: usage.error, activity, alert, tokenExpiresAt,
+      usage: usage.data, fetchedAt: usage.fetchedAt, error: usage.error, activity, alert,
     }));
     return;
   }
@@ -1480,8 +1520,6 @@ const server = http.createServer(async (req, res) => {
     const hn = hq == null ? 24 : Number(hq);
     const hours = Number.isFinite(hn) ? hn : 24;         // ≤0 = 全部历史(永久保留, 不再有 30 天上限)
     const cut = hours > 0 ? Date.now() - hours * 3600 * 1000 : 0;
-    let tokenExpiresAt = null;
-    try { tokenExpiresAt = readCreds().claudeAiOauth.expiresAt; } catch { /* 无凭据 */ }
     // 窗口外再多带一个点当"锚": 否则半夜关机后早上看 6 小时档, 线只画得出右边一小截。
     // 有了锚点, 前端能把周额度按"值不动"平推到左边缘(锚点落在 viewBox 外, SVG 自己会裁掉)。
     const i0 = usageHist.findIndex(p => p.t >= cut);
@@ -1490,7 +1528,6 @@ const server = http.createServer(async (req, res) => {
       usage: usage.data, limits: usage.limits || [],
       fetchedAt: usage.fetchedAt, error: usage.error, nextTryAt: usage.nextTryAt,
       intervalMin: Math.max(1, (config.usage && config.usage.intervalMin) || 1),
-      tokenExpiresAt,
       history: thinHist(win, USAGE_HIST_MAX_POINTS),
       historyShown: win.length,                          // 抽稀前该档位实际有多少点
       historyTotal: usageHist.length,
@@ -1608,20 +1645,73 @@ const server = http.createServer(async (req, res) => {
   if (u.pathname === '/api/activity-report' && req.method === 'POST') {
     try {
       const body = await readBody(req);
-      const dev = (u.searchParams.get('device') || 'remote').slice(0, 24);
-      const s = deriveHookState(body);
-      if (s) remoteDevices[dev] = { state: s.state, tool: s.tool || null, notice: s.notice || null, ts: Date.now() };
-      else if (remoteDevices[dev]) remoteDevices[dev].ts = Date.now();   // 无关事件也算心跳
+      /* 两种上报格式都收:
+         ① 原始 hook JSON(带 hook_event_name) —— 老路子, 由本端 deriveHookState 归一化;
+         ② 已归一化的 v=1 事件(mac-hook.js 发的, 已在源头脱敏) —— 直接采信它的 state/kind/tool。
+         设备名优先取事件里的 device, 其次 ?device=, 最后兜底 remote。 */
+      const isV1 = body && body.v === 1 && body.state;
+      const dev = String((isV1 && body.device) || u.searchParams.get('device') || 'remote').slice(0, 24);
+      const s = isV1
+        ? { state: body.state, kind: body.kind || null, tool: body.tool || null, notice: body.notice || null, detail: body.detail || null }
+        : deriveHookState(body);
+      if (s) {
+        remoteDevices[dev] = { state: s.state, tool: s.tool || null, notice: s.notice || null, ts: Date.now() };
+        const sid = (isV1 ? body.sessionId : body.session_id) || null;
+        // 卡片显示名优先级: 用户自定别名 > 会话名 > (都没有就退回 cwd 末段, 再退回"设备 会话")
+        const name = isV1 ? (body.alias || body.title || null) : null;
+        if (s.state === 'ended') remoteSessions.delete(dev + '|' + sid);   // 会话结束就撤卡
+        else remoteSessionPut(dev, sid, s, body.cwd, name, isV1 ? body.reply : null);
+        // 同一条事件转发进 supervisor 总线(历史/SSE/设备表都在那边)
+        forwardToBus(isV1 ? body : Object.assign({ v: 1, device: dev, sessionId: sid, ts: Date.now() }, s));
+      } else if (remoteDevices[dev]) remoteDevices[dev].ts = Date.now();   // 无关事件也算心跳
       return json(res, 200, { ok: true });
     } catch { return json(res, 400, { error: 'bad body' }); }
   }
   if (u.pathname === '/api/devices') {
+    /* 设备表以 supervisor 总线为准 —— 它是所有设备事件的汇总层, 之前两边各算各的会对不上。
+       这里只负责把总线那份翻译成本接口原有的形状(admin 页在用), 再把本机才知道的细状态
+       (thinking/tool/permission…)贴回去。总线不可达就退回自己算的, source 字段标明数据来自谁。 */
     const now = Date.now();
-    const list = [{ name: 'PC (本机)', state: activity.device === 'PC' ? activity.state : 'idle', lastSeen: activity.lastActiveMs, local: true }];
-    for (const [n, r] of Object.entries(remoteDevices)) {
-      list.push({ name: n, state: (now - r.ts < 30 * MIN) ? (decay(r.state, now - r.ts) || 'sleeping') : 'sleeping', lastSeen: r.ts, local: false });
+    const localState = d => {
+      if (d === LOCAL_DEVICE || d === 'PC') return activity.device === 'PC' ? activity.state : 'idle';
+      const r = remoteDevices[d];
+      if (!r) return null;
+      return (now - r.ts < 30 * MIN) ? (decay(r.state, now - r.ts) || 'sleeping') : 'sleeping';
+    };
+    /* 取并集而不是照抄总线: 总线是内存环形缓冲, 它一重启就把设备忘光, 而副屏这边可能还留着
+       这台设备的活跃会话 —— 那种时候照抄就会"显示得比自己知道的还少"(实测踩到过)。
+       所以: 总线有的以总线为准(它是汇总层), 总线没有但本机确实还在跟的补上。 */
+    const fresh = busDevices.list && now - busDevices.at < 60 * 1000;
+    const seen = new Set();
+    const list = [];
+    if (fresh) {
+      for (const d of busDevices.list) {
+        seen.add(d.device);
+        list.push({
+          name: d.device === 'PC' ? 'PC (本机)' : d.device,
+          state: d.online ? (localState(d.device) || 'idle') : 'sleeping',
+          lastSeen: d.lastTs, local: d.device === 'PC' || d.device === LOCAL_DEVICE,
+          online: d.online, sessions: d.sessions, from: 'bus',
+        });
+      }
     }
-    return json(res, 200, { devices: list });
+    if (!seen.has('PC') && !seen.has(LOCAL_DEVICE)) {
+      list.unshift({ name: 'PC (本机)', state: localState('PC'), lastSeen: activity.lastActiveMs, local: true, online: true, from: 'local' });
+      seen.add('PC');
+    }
+    // 本机还在跟、但总线不知道的远程设备(如总线刚重启): 按活跃会话数补进来
+    const liveByDev = {};
+    for (const r of remoteSessions.values()) {
+      if (now - r.ts <= SESS_ACTIVE_MS) liveByDev[r.device] = (liveByDev[r.device] || 0) + 1;
+    }
+    for (const [n, r] of Object.entries(remoteDevices)) {
+      if (seen.has(n)) continue;
+      list.push({
+        name: n, state: localState(n), lastSeen: r.ts, local: false,
+        online: now - r.ts < 30 * MIN, sessions: liveByDev[n] || 0, from: 'local',
+      });
+    }
+    return json(res, 200, { devices: list, source: fresh ? 'supervisor-bus+local' : 'local-fallback' });
   }
   if (u.pathname === '/api/system') {
     return new Promise(resolve => {
@@ -1636,15 +1726,38 @@ const server = http.createServer(async (req, res) => {
     } catch { json(res, 400, { error: 'bad body' }); }
     return;
   }
+  if (u.pathname === '/api/dashboard/topmost' && req.method === 'GET') {
+    if (topmostBusy) { json(res, 503, { ok: false, error: '正在切换置顶状态' }); return; }
+    try {
+      const state = await readTopmost();
+      json(res, 200, { ...state, desired: config.dashboardWindow?.topmost !== false });
+    } catch { json(res, 503, { ok: false, error: '无法读取仪表盘置顶状态' }); }
+    return;
+  }
+  if (u.pathname === '/api/dashboard/topmost' && req.method === 'POST') {
+    let body;
+    try { body = await readBody(req); } catch { json(res, 400, { ok: false, error: '请求格式错误' }); return; }
+    if (!body || typeof body.on !== 'boolean') { json(res, 400, { ok: false, error: 'on 必须是布尔值' }); return; }
+    if (topmostBusy) { json(res, 409, { ok: false, error: '正在切换，请稍后重试' }); return; }
+    topmostBusy = true;
+    try {
+      // Finish an older read before writing so it cannot overwrite the new state cache.
+      if (topmostRead) await topmostRead.catch(() => {});
+      const state = await runTopmost(body.on ? 'on' : 'off');
+      topmostCache = { value: state, at: Date.now() };
+      if (!state.ok) { json(res, 500, { ...state, error: '部分仪表盘窗口切换失败' }); return; }
+      config.dashboardWindow = { ...config.dashboardWindow, topmost: body.on }; saveConfig();
+      json(res, 200, { ...state, desired: body.on });
+    } catch { json(res, 500, { ok: false, error: '仪表盘置顶切换失败' }); }
+    finally { topmostBusy = false; }
+    return;
+  }
   if (u.pathname === '/api/mouseguard' && req.method === 'GET') {
     return new Promise(resolve => {
-      queryMouseGuard(running => {
+      queryMouseGuard((running, s) => {
         let state = 'off', stateDetail = '';
         if (running) {
-          try {
-            const s = JSON.parse(fs.readFileSync(path.join(__dirname, 'mouse-guard.state.json'), 'utf8'));
-            state = s.state || 'fence'; stateDetail = s.detail || '';
-          } catch { state = 'fence'; }
+          state = s.state || 'fence'; stateDetail = s.detail || '';
         }
         const mg = config.mouseGuard || {};
         json(res, 200, { running, enabled: !!mg.enabled, state, stateDetail, games: mg.games || [] });
@@ -1664,7 +1777,7 @@ const server = http.createServer(async (req, res) => {
       return new Promise(resolve => {
         setMouseGuard(on, err => {
           if (err) { json(res, 500, { error: String(err.message || err) }); return resolve(); }
-          // 开关是异步生效的(进程起/杀要点时间), 稍等再查真状态回给调用方
+          // 开关是异步生效的，稍等守卫写入第一帧心跳后再返回。
           setTimeout(() => queryMouseGuard(running => { json(res, 200, { ok: true, running, enabled: on }); resolve(); }), 1200);
         });
       });
@@ -1846,13 +1959,11 @@ function ddcSend(line) {
 
 function spawnDdc() {
   if (ddc.child) return;   // 单例: 多个 agent 会抢 i2c 总线互相搞崩 + 按键双触发
-  // 先杀掉历史孤儿 agent —— 多个 agent 会互相抢着弹回亮度, 吃掉按键事件
-  try {
-    // 只匹配 "-File ...ddc-agent.ps1" 的真代理, 避免匹配到本清理命令自己
-    const kill = "Get-CimInstance Win32_Process -Filter \"Name='powershell.exe'\" | Where-Object { $_.CommandLine -match '-File.+ddc-agent\\.ps1' -and $_.ProcessId -ne $PID } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }";
-    require('child_process').execFileSync('powershell', ['-NoProfile', '-Command', kill], { timeout: 15000 });
-  } catch { /* 清理失败也继续 */ }
-  const child = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(__dirname, 'ddc-agent.ps1')], { windowsHide: true });
+  // 代理每几秒检查一次 ParentPid；Node 退出后它会自行退出，不需要 WMI 搜索/强杀历史进程。
+  const child = spawn('powershell', [
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(__dirname, 'ddc-agent.ps1'),
+    '-ParentPid', String(process.pid),
+  ], { windowsHide: true });
   ddc.child = child;
   let buf = '';
   child.stdout.on('data', d => {

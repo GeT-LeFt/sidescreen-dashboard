@@ -19,9 +19,19 @@ $log = Join-Path $PSScriptRoot 'mouse-guard.log'
 function L($m) { "$([DateTime]::Now.ToString('MM-dd HH:mm:ss')) $m" | Out-File -FilePath $log -Append -Encoding ascii }
 # state file for the dashboard UI: {"state":"fence|lock|yield|off","detail":"...","ts":epochMs}
 $stateFile = Join-Path $PSScriptRoot 'mouse-guard.state.json'
+$stopFile = Join-Path $PSScriptRoot 'mouse-guard.stop'
+$script:lastStateWrite = 0
 function WriteState($s, $detail) {
   $ts = [DateTimeOffset]::Now.ToUnixTimeMilliseconds()
-  ('{"state":"' + $s + '","detail":"' + $detail + '","ts":' + $ts + '}') | Out-File -FilePath $stateFile -Encoding ascii
+  ('{"state":"' + $s + '","detail":"' + $detail + '","ts":' + $ts + ',"pid":' + $PID + '}') | Out-File -FilePath $stateFile -Encoding ascii
+  $script:lastStateWrite = $ts
+}
+function Test-FreshRunning {
+  try {
+    $s = Get-Content -LiteralPath $stateFile -Raw -Encoding ascii | ConvertFrom-Json
+    $age = [DateTimeOffset]::Now.ToUnixTimeMilliseconds() - [int64]$s.ts
+    return $s.state -ne 'off' -and $age -ge 0 -and $age -le 15000
+  } catch { return $false }
 }
 
 Add-Type -TypeDefinition @"
@@ -105,19 +115,28 @@ public class MouseFence {
 }
 "@
 
-# find other real instances (self-match trap: require '-File <whitespace> ... mouse-guard.ps1')
-$others = Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue |
-  Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -match '-File\s+\S*mouse-guard\.ps1' }
-
-if ($Mode -eq 'off' -or ($Mode -eq 'toggle' -and $others)) {
-  if ($others) { $others | ForEach-Object { Stop-Process -Id $_.ProcessId -Force } }
-  Start-Sleep -Milliseconds 200
-  [MouseFence]::Release()   # lift the fence after killing the keeper
+# Process coordination deliberately avoids the old process-enumeration RPC path implicated in
+# repeated LSASS/RPCRT4 crashes. A tiny stop-request file handles shutdown; a named mutex prevents
+# duplicates. The keeper refreshes its state heartbeat every five seconds for the dashboard.
+$freshRunning = Test-FreshRunning
+if ($Mode -eq 'off' -or ($Mode -eq 'toggle' -and $freshRunning)) {
+  try { [IO.File]::WriteAllText($stopFile, 'stop', [Text.Encoding]::ASCII) } catch {}
+  $deadline = [DateTime]::UtcNow.AddSeconds(4)
+  while ([DateTime]::UtcNow -lt $deadline) {
+    Start-Sleep -Milliseconds 100
+    if (-not (Test-FreshRunning)) { break }
+  }
+  [MouseFence]::Release()   # final safety release if the keeper was already unhealthy
   WriteState 'off' ''
-  L "OFF ($Mode, killed $((@($others)).Count))"
+  L "OFF ($Mode, stop-request)"
   exit 0
 }
-if ($others) { exit 0 }   # mode 'on' and already running
+
+$mutex = New-Object System.Threading.Mutex($false, 'Local\SidescreenMouseGuard')
+$ownsMutex = $false
+try { $ownsMutex = $mutex.WaitOne(0) } catch [System.Threading.AbandonedMutexException] { $ownsMutex = $true }
+if (-not $ownsMutex) { exit 0 }
+Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
 
 # game processes that get GAME-LOCK (fence tightened to the game's monitor so
 # menu-screen cursor cannot drift to the other main monitor in borderless mode).
@@ -140,9 +159,17 @@ $desc = [MouseFence]::Apply()
 L "ON v2(ClipCursor) $desc games=[$($games -join ',')]"
 $last = $desc
 $state = 'fence'   # fence | yield | lock
+$detail = ''
 WriteState 'fence' ''
 while ($true) {
   Start-Sleep -Seconds 2
+  if (Test-Path -LiteralPath $stopFile) {
+    Remove-Item -LiteralPath $stopFile -Force -ErrorAction SilentlyContinue
+    [MouseFence]::Release()
+    WriteState 'off' ''
+    L 'keeper stopped cleanly'
+    break
+  }
   # hot-reload game list when config.json changes
   $st = (Get-Item $cfgPath -ErrorAction SilentlyContinue).LastWriteTime
   if ($st -and $st -ne $cfgStamp) { $cfgStamp = $st; Load-Games }
@@ -154,14 +181,21 @@ while ($true) {
     if ($games -contains $proc) {
       # game-lock: tighten fence to the game's monitor (covers borderless menu drift)
       [MouseFence]::ClipTo([int]$parts[1], [int]$parts[2], [int]$parts[3], [int]$parts[4])
-      if ($state -ne 'lock') { $state = 'lock'; WriteState 'lock' $proc; L "game-lock: $proc -> monitor $($parts[1]),$($parts[2])-$($parts[3]),$($parts[4])" }
+      $detail = $proc
+      if ($state -ne 'lock') { $state = 'lock'; WriteState 'lock' $detail; L "game-lock: $proc -> monitor $($parts[1]),$($parts[2])-$($parts[3]),$($parts[4])" }
     } else {
       # unknown fullscreen app (video etc.): yield, do not fight its own clip
-      if ($state -ne 'yield') { $state = 'yield'; WriteState 'yield' $proc; L "yield: fullscreen '$proc'" }
+      $detail = $proc
+      if ($state -ne 'yield') { $state = 'yield'; WriteState 'yield' $detail; L "yield: fullscreen '$proc'" }
     }
+    if ([DateTimeOffset]::Now.ToUnixTimeMilliseconds() - $script:lastStateWrite -ge 5000) { WriteState $state $detail }
     continue
   }
-  if ($state -ne 'fence') { $state = 'fence'; WriteState 'fence' ''; L "resume fencing" }
+  $detail = ''
+  if ($state -ne 'fence') { $state = 'fence'; WriteState 'fence' $detail; L "resume fencing" }
   $d = [MouseFence]::Apply()    # re-apply: heals resets by other apps, re-captures escaped cursor
   if ($d -ne $last) { L "screens changed: $d"; $last = $d }
+  if ([DateTimeOffset]::Now.ToUnixTimeMilliseconds() - $script:lastStateWrite -ge 5000) { WriteState $state $detail }
 }
+try { $mutex.ReleaseMutex() } catch {}
+$mutex.Dispose()

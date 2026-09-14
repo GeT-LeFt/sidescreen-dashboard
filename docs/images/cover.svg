@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="600" viewBox="0 0 1600 600">
+<defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#0c1320"/><stop offset="1" stop-color="#15121a"/></linearGradient><linearGradient id="line"><stop stop-color="#f59e0b"/><stop offset="1" stop-color="#5b9cf5"/></linearGradient></defs>
+<rect width="1600" height="600" rx="28" fill="url(#bg)"/>
+<g fill="none" stroke="#263248" opacity=".5"><path d="M0 480H1600M0 400H1600M0 320H1600M0 240H1600M0 160H1600M0 80H1600M1200 0V600M1360 0V600M1520 0V600"/></g>
+<rect x="70" y="70" width="7" height="32" rx="3" fill="#f59e0b"/>
+<text x="94" y="95" fill="#f4bf62" font-family="Segoe UI,sans-serif" font-size="22" letter-spacing="5">YOUR DESK. AT A GLANCE.</text>
+<text x="70" y="202" fill="#f3f6fc" font-family="Segoe UI,sans-serif" font-size="78" font-weight="700">SideScreen</text>
+<text x="70" y="283" fill="#f3f6fc" font-family="Segoe UI,sans-serif" font-size="78" font-weight="700">Dashboard</text>
+<text x="75" y="340" fill="#9dacbf" font-family="Microsoft YaHei,sans-serif" font-size="27">把闲置副屏，变成桌面的信息与控制中心。</text>
+<g font-family="Segoe UI,sans-serif" font-size="18" fill="#b8c6da"><text x="75" y="408">WINDOWS</text><text x="228" y="408">NODE.JS</text><text x="381" y="408">TOUCH + KEYS</text><text x="600" y="408">LOCAL FIRST</text></g>
+<g transform="translate(890 112)"><rect width="630" height="315" rx="24" fill="#070b12" stroke="#354359" stroke-width="2"/>
+<g fill="#151d2a" stroke="#263248"><rect x="20" y="20" width="185" height="208" rx="12"/><rect x="219" y="20" width="185" height="208" rx="12"/><rect x="418" y="20" width="192" height="208" rx="12"/><rect x="20" y="242" width="590" height="51" rx="12"/></g>
+<text x="38" y="51" fill="#8193ad" font-family="Segoe UI,sans-serif" font-size="14">SYSTEM</text><text x="38" y="110" fill="#f4f7fc" font-family="Segoe UI,sans-serif" font-size="42" font-weight="700">24%</text>
+<path d="M38 191L63 174L83 182L107 143L130 151L153 130L185 137" fill="none" stroke="#f59e0b" stroke-width="3"/>
+<text x="241" y="51" fill="#8193ad" font-family="Segoe UI,sans-serif" font-size="14">FOCUS</text><text x="239" y="115" fill="#f4f7fc" font-family="Segoe UI,sans-serif" font-size="38" font-weight="700">14:30</text><rect x="239" y="162" width="143" height="8" rx="4" fill="#273247"/><rect x="239" y="162" width="61" height="8" rx="4" fill="#5b9cf5"/>
+<text x="437" y="51" fill="#8193ad" font-family="Segoe UI,sans-serif" font-size="14">SESSIONS</text><circle cx="443" cy="93" r="5" fill="#5b9cf5"/><rect x="458" y="86" width="123" height="12" rx="6" fill="#34445e"/><circle cx="443" cy="136" r="5" fill="#4ade80"/><rect x="458" y="129" width="97" height="12" rx="6" fill="#34445e"/><circle cx="443" cy="178" r="5" fill="#f59e0b"/><rect x="458" y="171" width="112" height="12" rx="6" fill="#34445e"/>
+<text x="40" y="274" fill="#9dacbf" font-family="Segoe UI,sans-serif" font-size="15">OVERVIEW / SESSIONS / CONTROL / MEDIA</text></g>
+<rect x="75" y="482" width="1445" height="2" fill="url(#line)"/>
+<text x="75" y="536" fill="#70829b" font-family="Segoe UI,sans-serif" font-size="20" letter-spacing="3">960 × 640 + 3840 × 1100</text><text x="1160" y="536" fill="#70829b" font-family="Segoe UI,sans-serif" font-size="20">OPEN SOURCE / MIT</text>
+</svg>

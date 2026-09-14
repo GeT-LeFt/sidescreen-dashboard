@@ -1,0 +1,37 @@
+.screen-controls { display:flex; align-items:center; gap:14px; flex:0 0 auto; margin-left:auto; }
+.screen-toggle { appearance:none; display:flex; align-items:center; justify-content:center; gap:16px;
+  width:236px; height:122px; padding:16px; border:1px solid #30394a; border-radius:22px;
+  background:#171d27; color:#c5cedb; font:inherit; cursor:pointer; touch-action:manipulation;
+  transition:background .15s,border-color .15s; }
+.screen-toggle svg { width:34px; height:34px; flex:none; fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round; }
+.screen-toggle .sc-copy { display:flex; flex-direction:column; gap:7px; text-align:left; white-space:nowrap; }
+.screen-toggle .sc-label { font-size:27px; font-weight:700; line-height:1.2; }
+.screen-toggle .sc-state { font-size:21px; color:#9ba8ba; line-height:1.2; font-weight:500; }
+.screen-toggle .sc-state::before { content:''; display:inline-block; width:9px; height:9px; margin-right:8px; border-radius:50%; background:#6b7788; }
+.screen-toggle[aria-pressed="true"] { color:#b5efdb; border-color:#398b73; background:#142922; }
+.screen-toggle[aria-pressed="true"] .sc-state { color:#9adcc2; }
+.screen-toggle[aria-pressed="true"] .sc-state::before { background:#6addb0; }
+.screen-toggle.sc-warning .sc-state { color:#ffd080; }
+.screen-toggle.sc-warning .sc-state::before { background:#efb752; }
+.screen-toggle:focus-visible { outline:3px solid #86bcff; outline-offset:4px; }
+.screen-toggle:active:not(:disabled) { background:#263445; }
+.screen-toggle:disabled { opacity:.65; cursor:wait; }
+.screen-controls-toast { position:fixed; left:50%; bottom:190px; transform:translateX(-50%); z-index:150;
+  max-width:80%; padding:20px 32px; border:1px solid #425066; border-radius:18px;
+  background:#141c29; color:#f1f5fc; font-size:28px; box-shadow:0 8px 30px #0008;
+  opacity:0; pointer-events:none; transition:opacity .15s; }
+.screen-controls-toast.visible { opacity:1; }
+#gameSide > .screen-controls { margin:12px 0 0; }
+#gameSide > .screen-controls .screen-toggle { flex:1; min-width:0; }
+/* Reserve a footer on the 960 x 640 panel; no controls cover the widgets. */
+body.sc-small .wrap { height:574px; }
+body.sc-small #grid { zoom:.9; }
+body.sc-small #dots { bottom:67px; }
+.sc-small-footer { position:fixed; left:12px; right:12px; bottom:8px; height:54px; margin:0; gap:10px; z-index:40; }
+.sc-small-footer .screen-toggle { width:auto; height:54px; flex:1; padding:8px 18px; gap:12px; border-radius:12px; }
+.sc-small-footer .screen-toggle svg { width:23px; height:23px; }
+.sc-small-footer .sc-copy { flex-direction:row; align-items:center; gap:18px; }
+.sc-small-footer .sc-label { font-size:18px; }
+.sc-small-footer .sc-state { font-size:15px; }
+.sc-small-footer .sc-state::before { width:7px; height:7px; }
+body.sc-small .screen-controls-toast { bottom:78px; padding:12px 18px; font-size:18px; }

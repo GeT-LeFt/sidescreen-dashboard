@@ -1,8 +1,15 @@
 ﻿# 副屏仪表盘一键启动：起服务 → 开 Edge kiosk → 移动到副屏
 # 用法: 双击 start-sidescreen.cmd，或 powershell -ExecutionPolicy Bypass -File start-sidescreen.ps1
+param([switch]$SkipScreenGuard)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $port = 3777
+$dashboardTopmost = $true
+try {
+  $savedConfig = Get-Content -LiteralPath (Join-Path $root 'config.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+  if ($savedConfig.dashboardWindow.topmost -eq $false) { $dashboardTopmost = $false }
+} catch { }
+$dashboardZOrder = if ($dashboardTopmost) { [IntPtr]::new(-1) } else { [IntPtr]::new(-2) }
 
 # 先声明 DPI 感知，后面所有坐标都是物理像素（混合缩放环境下必须最先做）
 Add-Type @"
@@ -53,16 +60,14 @@ class TaskbarListClass { }
 "@
 [WinMove]::SetProcessDpiAwarenessContext([IntPtr]::new(-4)) | Out-Null   # PER_MONITOR_AWARE_V2
 
-# 自动探测副屏：优先找 960x640 的屏，找不到就取最小的非主屏
+# 自动探测小副屏：只认 960x640；不在线就跳过，绝不能拿长条屏/普通屏顶替。
 Add-Type -AssemblyName System.Windows.Forms
 $screens = [System.Windows.Forms.Screen]::AllScreens
 $side = $screens | Where-Object { $_.Bounds.Width -eq 960 -and $_.Bounds.Height -eq 640 } | Select-Object -First 1
-if (-not $side) {
-  $side = $screens | Where-Object { -not $_.Primary } | Sort-Object { $_.Bounds.Width * $_.Bounds.Height } | Select-Object -First 1
-}
-if (-not $side) { Write-Error "没找到副屏"; exit 1 }
-$screenX = $side.Bounds.X; $screenY = $side.Bounds.Y; $screenW = $side.Bounds.Width; $screenH = $side.Bounds.Height
-Write-Output ("side screen: {0} at ({1},{2}) {3}x{4}" -f $side.DeviceName, $screenX, $screenY, $screenW, $screenH)
+if ($side) {
+  $screenX = $side.Bounds.X; $screenY = $side.Bounds.Y; $screenW = $side.Bounds.Width; $screenH = $side.Bounds.Height
+  Write-Output ("side screen: {0} at ({1},{2}) {3}x{4}" -f $side.DeviceName, $screenX, $screenY, $screenW, $screenH)
+} else { Write-Output "small screen (960x640) not present, skipped" }
 
 # 1. 服务端（已在跑就跳过）
 $alive = $false
@@ -76,8 +81,10 @@ if (-not $alive) {
   if (-not $alive) { Write-Error "服务端启动失败"; exit 1 }
 }
 
-# 2. Edge kiosk（独立配置目录，不影响日常 Edge）
-Start-Process msedge -ArgumentList @(
+# 2. 小屏 Edge kiosk（独立配置目录，不影响日常 Edge）；屏不在就完全跳过。
+if ($side) {
+$smallUp = Get-Process msedge -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 -and $_.MainWindowTitle -like '*副屏仪表盘*' -and $_.MainWindowTitle -notlike '*宽屏仪表盘*' } | Select-Object -First 1
+if (-not $smallUp) { Start-Process msedge -ArgumentList @(
   "--user-data-dir=$env:LOCALAPPDATA\sidescreen-edge",
   '--kiosk', "http://localhost:$port",
   '--edge-kiosk-type=fullscreen',
@@ -86,7 +93,7 @@ Start-Process msedge -ArgumentList @(
   '--disable-sync',
   '--no-default-browser-check',
   '--disable-features=msImplicitSignin,msSeamlessWebToBrowserSignIn'
-)
+)}
 
 # 3. 把 kiosk 窗口移到副屏
 $hwnd = [IntPtr]::Zero
@@ -102,14 +109,15 @@ if ($hwnd -eq [IntPtr]::Zero) { Write-Error "没找到 kiosk 窗口"; exit 1 }
 # 工具窗口不在任务栏显示；FRAMECHANGED 让 Explorer 立即刷新窗口类型。
 [WinMove]::HideFromTaskbar($hwnd)
 # HWND_TOPMOST(-1): 置顶才能盖住副屏自己的 Windows 任务栏(Shell_SecondaryTrayWnd), 不影响主屏/Dell 的任务栏
-[WinMove]::SetWindowPos($hwnd, [IntPtr]::new(-1), 0, 0, 0, 0, 0x0027) | Out-Null
-[WinMove]::SetWindowPos($hwnd, [IntPtr]::new(-1), $screenX, $screenY, $screenW, $screenH, 0x0040) | Out-Null
+[WinMove]::SetWindowPos($hwnd, $dashboardZOrder, 0, 0, 0, 0, 0x0033) | Out-Null
+[WinMove]::SetWindowPos($hwnd, $dashboardZOrder, $screenX, $screenY, $screenW, $screenH, 0x0050) | Out-Null
 Start-Sleep -Milliseconds 800
 $r = New-Object 'WinMove+RECT'
 [WinMove]::GetWindowRect($hwnd, [ref]$r) | Out-Null
 [WinMove]::HideFromTaskbar($hwnd)   # 安顿后再移除一次(Edge 首帧可能重新注册任务栏)
 [WinMove]::HideTrayOn($screenX, $screenY, $screenW, $screenH) | Out-Null   # 隐藏这块屏自己的 Windows 任务栏
 Write-Output ("dashboard at X={0} Y={1} {2}x{3}" -f $r.L, $r.T, ($r.R - $r.L), ($r.B - $r.T))
+}
 
 # 4. 宽副屏(3840x1100 长条屏)kiosk —— 屏不在就跳过
 $wide = $screens | Where-Object { $_.Bounds.Width -eq 3840 -and $_.Bounds.Height -eq 1100 } | Select-Object -First 1
@@ -133,12 +141,20 @@ if ($wide) {
   }
   if ($whwnd -ne [IntPtr]::Zero) {
     [WinMove]::HideFromTaskbar($whwnd)
-    [WinMove]::SetWindowPos($whwnd, [IntPtr]::new(-1), 0, 0, 0, 0, 0x0027) | Out-Null   # HWND_TOPMOST 盖住副屏任务栏
-    [WinMove]::SetWindowPos($whwnd, [IntPtr]::new(-1), $wx, $wy, 3840, 1100, 0x0040) | Out-Null
+    [WinMove]::SetWindowPos($whwnd, $dashboardZOrder, 0, 0, 0, 0, 0x0033) | Out-Null
+    [WinMove]::SetWindowPos($whwnd, $dashboardZOrder, $wx, $wy, 3840, 1100, 0x0050) | Out-Null
     Start-Sleep -Milliseconds 600
+    $r = New-Object 'WinMove+RECT'
     [WinMove]::GetWindowRect($whwnd, [ref]$r) | Out-Null
     [WinMove]::HideFromTaskbar($whwnd)   # 安顿后再移除一次
     [WinMove]::HideTrayOn($wx, $wy, 3840, 1100) | Out-Null   # 隐藏长条屏自己的 Windows 任务栏
     Write-Output ("wide dashboard at X={0} Y={1} {2}x{3}" -f $r.L, $r.T, ($r.R - $r.L), ($r.B - $r.T))
   } else { Write-Output "wide kiosk window not found" }
 } else { Write-Output "wide screen (3840x1100) not present, skipped" }
+
+# 5. 普通应用窗口守卫：副屏只留仪表盘；应用若记住副屏位置，自动搬回最近使用的大屏。
+$guardScript = Join-Path $root 'screen-role-guard.ps1'
+# The guard owns a named mutex, so duplicate launch attempts exit without a WMI process scan.
+if (-not $SkipScreenGuard -and (Test-Path $guardScript)) {
+  Start-Process powershell -WindowStyle Hidden -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',("`"$guardScript`""),'-Mode','watch')
+}

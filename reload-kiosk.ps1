@@ -1,8 +1,12 @@
-# Reload the sidescreen kiosk: kill only the dedicated-profile Edge, then relaunch via start script.
+﻿# Reload the sidescreen kiosk: close only the two dashboard windows, then relaunch via start script.
 # Called by server.js /api/system/reload-kiosk (admin console button).
+param([switch]$SkipScreenGuard)
 $ErrorActionPreference = 'SilentlyContinue'
-$procs = Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" |
-         Where-Object { $_.CommandLine -like '*sidescreen-edge*' }
-foreach ($p in $procs) { Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue }
+$procs = Get-Process msedge -ErrorAction SilentlyContinue | Where-Object {
+  $_.MainWindowHandle -ne 0 -and ($_.MainWindowTitle -like '*副屏仪表盘*' -or $_.MainWindowTitle -like '*宽屏仪表盘*')
+}
+foreach ($p in $procs) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue }
 Start-Sleep -Milliseconds 700
-& powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'start-sidescreen.ps1')
+$startArguments = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', (Join-Path $PSScriptRoot 'start-sidescreen.ps1'))
+if ($SkipScreenGuard) { $startArguments += '-SkipScreenGuard' }
+& powershell @startArguments

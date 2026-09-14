@@ -4,11 +4,12 @@
 <meta charset="utf-8">
 <title>宽屏仪表盘</title>
 <link rel="stylesheet" href="/wide.css">
+<link rel="stylesheet" href="/screen-controls.css">
 </head>
 <body>
 
 <div id="track">
-  <!-- ⓪ Claude 会话页(从看板往下拉进入) -->
+  <!-- ⓪ Codex 会话页(从看板往下拉进入) -->
   <section class="page" id="page-claude">
     <div class="body" id="claudeBody">
       <div id="csRail">
@@ -18,11 +19,12 @@
           <div class="cs-num wait" id="csWaitWrap"><b id="csWaiting">0</b><span>等你操作</span></div>
         </div>
         <div id="csMsg">—</div>
+        <div id="csDevs"></div>
         <div class="card" id="csUsage">
-          <div class="t">CLAUDE CODE 用量<span class="hint">点开详情</span></div>
-          <div class="ubar"><div class="label-row"><span>会话</span><b id="csSessPct">--%</b></div><div class="hbar"><i id="csSessBar"></i></div></div>
-          <div class="ubar"><div class="label-row"><span>周额度</span><b id="csWeekPct">--%</b></div><div class="hbar"><i id="csWeekBar"></i></div></div>
-          <div class="ubar"><div class="label-row"><span id="csScLabel">Opus</span><b id="csScPct">--%</b></div><div class="hbar"><i id="csScBar"></i></div></div>
+          <div class="t">CODEX 用量<span class="hint">点开详情</span></div>
+          <div class="ubar" id="csUsageRow0"><div class="label-row"><span id="csMainLabel">Codex 周额度</span><b id="csSessPct">--%</b></div><div class="hbar"><i id="csSessBar"></i></div></div>
+          <div class="ubar" id="csUsageRow1"><div class="label-row"><span id="csAuxLabel1">模型额度</span><b id="csWeekPct">--%</b></div><div class="hbar"><i id="csWeekBar"></i></div></div>
+          <div class="ubar" id="csUsageRow2"><div class="label-row"><span id="csAuxLabel2">更多额度</span><b id="csScPct">--%</b></div><div class="hbar"><i id="csScBar"></i></div></div>
           <div id="csUsageMeta">—</div>
         </div>
       </div>
@@ -36,8 +38,8 @@
       </div>
     </div>
     <div class="dock" id="dock-claude">
-      <span class="pgname">CLAUDE</span>
-      <span id="csDockHint">最近 30 分钟活跃的 Claude Code 会话 · 数据来自本机 hooks</span>
+      <span class="pgname">CODEX</span>
+      <span id="csDockHint">最近 30 分钟的 Codex 任务 · supervisor 双通道实时聚合</span>
       <div style="flex:1"></div>
       <div class="dock-btn press-btn" id="csUsageBtn"><svg viewBox="0 0 24 24"><path d="M4 19V5M4 19h16M8 15v-4M12 15V8M16 15v-6"/></svg>额度详情</div>
     </div>
@@ -60,12 +62,12 @@
               <circle id="usageRing" cx="50" cy="50" r="43" fill="none" stroke="var(--accent)" stroke-width="10"
                       stroke-linecap="round" stroke-dasharray="0 270.2" transform="rotate(-90 50 50)"></circle>
             </svg>
-            <div class="pct"><div class="v" id="usageSessPct">--%</div><div class="l">会话额度</div></div>
+            <div class="pct"><div class="v" id="usageSessPct">--%</div><div class="l" id="usageRingLabel">Codex 周额度</div></div>
           </div>
           <div id="usageRight">
-            <div id="usageTitle">CLAUDE CODE 用量</div>
-            <div class="ubar"><div class="label-row"><span>周额度</span><b id="usageWeekPct">--%</b></div><div class="hbar"><i id="usageWeekBar"></i></div></div>
-            <div class="ubar"><div class="label-row"><span id="usageScopedLabel">Opus 额度</span><b id="usageScopedPct">--%</b></div><div class="hbar"><i id="usageScopedBar"></i></div></div>
+            <div id="usageTitle">CODEX 用量</div>
+            <div class="ubar" id="usageAuxRow1"><div class="label-row"><span id="usageAuxLabel1">模型周额度</span><b id="usageWeekPct">--%</b></div><div class="hbar"><i id="usageWeekBar"></i></div></div>
+            <div class="ubar" id="usageAuxRow2"><div class="label-row"><span id="usageAuxLabel2">更多额度</span><b id="usageScopedPct">--%</b></div><div class="hbar"><i id="usageScopedBar"></i></div></div>
             <div id="usageMeta">—</div>
             <div id="usageTok"></div>
           </div>
@@ -248,5 +250,6 @@
 
 <script src="/lunar.js"></script>
 <script src="/wide.js"></script>
+<script src="/screen-controls.js"></script>
 </body>
 </html>

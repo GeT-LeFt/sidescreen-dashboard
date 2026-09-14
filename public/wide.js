@@ -36,7 +36,7 @@ function drawSpark(svg, vals, opts) {
 }
 
 /* ---------- 页面切换(轨道 translateY + 边缘手势) ---------- */
-const PAGE_NAMES = ['CLAUDE 会话', '仪表盘', '操控台', '媒体'];
+const PAGE_NAMES = ['CODEX 对话', '仪表盘', '操控台', '媒体'];
 const track = $('#track');
 const QP = new URLSearchParams(location.search);
 /* 换了页序(Claude 插到 0), 换存储键避免读到旧编号; 默认停在仪表盘(1) */
@@ -271,58 +271,89 @@ setInterval(renderClock, 1000); renderClock();
   $('#mascot').innerHTML = svg;
 })();
 
-/* Claude 用量 */
-async function pollClaude() {
-  const c = await get('/api/claude'); if (!c) return;
-  const u = c.usage || {};
-  const CIRC = 2 * Math.PI * 43;
-  const sp = u.session ? Math.round(u.session.pct) : null;
-  $('#usageSessPct').textContent = sp != null ? sp + '%' : '--';
-  $('#usageRing').setAttribute('stroke-dasharray', `${((sp || 0) / 100) * CIRC} ${CIRC}`);
-  const wp = u.weekAll ? Math.round(u.weekAll.pct) : null;
-  $('#usageWeekPct').textContent = wp != null ? wp + '%' : '--';
-  $('#usageWeekBar').style.width = (wp || 0) + '%';
-  const sc = u.weekScoped;
-  $('#usageScopedLabel').textContent = (sc && sc.label ? sc.label : 'Opus') + ' 额度';
-  $('#usageScopedPct').textContent = sc ? Math.round(sc.pct) + '%' : '--';
-  $('#usageScopedBar').style.width = (sc ? sc.pct : 0) + '%';
-  let meta = c.error ? ('⚠ ' + c.error) : '';
-  if (!meta && u.session && u.session.resetsAt) {
-    const left = u.session.resetsAt - Date.now();
-    meta = `会话重置 ${Math.floor(left / 3600000)}小时${Math.round(left % 3600000 / 60000)}分 后`;
-  }
-  $('#usageMeta').textContent = meta || '—';
-  /* ⓪ 页迷你额度窗联动(同一份数据) */
-  $('#csSessPct').textContent = sp != null ? sp + '%' : '--';
-  $('#csSessBar').style.width = (sp || 0) + '%';
-  $('#csWeekPct').textContent = wp != null ? wp + '%' : '--';
-  $('#csWeekBar').style.width = (wp || 0) + '%';
-  $('#csScLabel').textContent = (sc && sc.label ? sc.label : 'Opus');
-  $('#csScPct').textContent = sc ? Math.round(sc.pct) + '%' : '--';
-  $('#csScBar').style.width = (sc ? sc.pct : 0) + '%';
-  $('#csUsageMeta').textContent = meta || '—';
-  const tok = $('#usageTok');
-  if (c.tokenExpiresAt) {
-    const min = Math.round((c.tokenExpiresAt - Date.now()) / 60000);
-    tok.classList.toggle('crit', min <= 0); tok.classList.toggle('warn', min > 0 && min < 30);
-    // 副屏不会自己续期(纯只读) -> 快到期时得把"该干什么"直接写在脸上, 免得盯着时间算
-    const act = ' · 去终端 claude 里 /login';
-    tok.textContent = min <= 0 ? '⚠ OAuth 令牌已过期' + act
-      : min < 30 ? `⚠ OAuth 令牌 ${min} 分钟后过期` + act
-      : min < 60 ? `⬤ OAuth 令牌 ${min} 分钟后过期`
-      : `⬤ OAuth 令牌 ${Math.floor(min / 60)} 小时后过期`;
-  } else tok.textContent = '';
+/* Codex 用量: 只读 Codex App Server，限额桶按官方实际返回动态显示。 */
+function fmtTokens(n) {
+  n = Number(n) || 0;
+  if (n >= 1e9) return (Math.round(n / 1e8) / 10) + 'B';
+  if (n >= 1e6) return (Math.round(n / 1e5) / 10) + 'M';
+  if (n >= 1e3) return Math.round(n / 1e3) + 'K';
+  return String(n);
 }
-setInterval(pollClaude, 30 * 1000); pollClaude();
+function latestDayTokenLine(u) {
+  if (!u || !u.latestDayDate) return u && u.todayTokens != null ? '今日 ' + fmtTokens(u.todayTokens) + ' token' : '';
+  const n = u.latestDayTokens != null ? u.latestDayTokens : u.todayTokens;
+  const now = new Date(), today = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(now.getDate()).padStart(2, '0');
+  const label = u.latestDayDate === today ? '今日' : u.latestDayDate.slice(5).replace('-', '/');
+  return label + ' ' + fmtTokens(n) + ' token';
+}
+function shortLimitName(m) {
+  if (!m) return '—';
+  const win = m.windowMins === 10080 ? '周额度'
+    : m.windowMins && m.windowMins % 60 === 0 ? (m.windowMins / 60) + ' 小时额度'
+    : '额度';
+  return (m.name || 'Codex') + ' ' + win;
+}
+function putUsageBar(rowSel, labelSel, pctSel, barSel, m) {
+  const row = $(rowSel), pct = m && m.pct != null ? Math.round(m.pct) : null;
+  if (row) row.classList.toggle('usage-hidden', !m);
+  if (!m) return;
+  $(labelSel).textContent = shortLimitName(m);
+  $(pctSel).textContent = pct + '%';
+  $(barSel).style.width = Math.min(100, Math.max(0, pct)) + '%';
+}
+async function pollCodex() {
+  const c = await get('/api/codex'); if (!c) return;
+  const u = c.usage || {}, main = u.main || null;
+  const all = Array.isArray(u.buckets) ? u.buckets : [];
+  const aux = all.filter(x => !main || x.key !== main.key);
+  const mp = main && main.pct != null ? Math.round(main.pct) : null;
+  const CIRC = 2 * Math.PI * 43;
+
+  $('#usageSessPct').textContent = mp != null ? mp + '%' : '--';
+  $('#usageRing').setAttribute('stroke-dasharray', `${((mp || 0) / 100) * CIRC} ${CIRC}`);
+  $('#usageRingLabel').textContent = main ? shortLimitName(main) : 'Codex 周额度';
+  putUsageBar('#usageAuxRow1', '#usageAuxLabel1', '#usageWeekPct', '#usageWeekBar', aux[0]);
+  putUsageBar('#usageAuxRow2', '#usageAuxLabel2', '#usageScopedPct', '#usageScopedBar', aux[1]);
+
+  // 有上次有效桶时继续显示额度；网络短暂失败只作为轻量状态，不把 25%/0% 覆盖成错误长串。
+  let meta = '';
+  if (main && main.resetsAt) meta = `主额度 ${fmtLeft(main.resetsAt - Date.now())}重置 · ${fmtAbs(main.resetsAt)}`;
+  if (c.error && !main && !all.length) meta = '⚠ Codex 用量暂不可用 · 正在重试';
+  else if (c.error && meta) meta += ' · 上次有效值';
+  $('#usageMeta').textContent = meta || '—';
+  const bits = [];
+  const dayLine = latestDayTokenLine(u); if (dayLine) bits.push(dayLine);
+  if (u.weekTokens != null) bits.push('近 7 日 ' + fmtTokens(u.weekTokens));
+  if (u.summary && u.summary.lifetimeTokens != null) bits.push('累计 ' + fmtTokens(u.summary.lifetimeTokens));
+  $('#usageTok').classList.remove('warn', 'crit');
+  $('#usageTok').textContent = bits.join(' · ');
+
+  /* ⓪ 页迷你额度窗联动；最多三条，有几种官方额度就显示几条。 */
+  const mini = [main, ...aux].filter(Boolean).slice(0, 3);
+  const slots = [
+    ['#csUsageRow0', '#csMainLabel', '#csSessPct', '#csSessBar'],
+    ['#csUsageRow1', '#csAuxLabel1', '#csWeekPct', '#csWeekBar'],
+    ['#csUsageRow2', '#csAuxLabel2', '#csScPct', '#csScBar'],
+  ];
+  slots.forEach((s, i) => putUsageBar(...s, mini[i]));
+  $('#csUsageMeta').textContent = meta || (u.weekTokens != null ? '近 7 日 ' + fmtTokens(u.weekTokens) + ' token' : '—');
+}
+setInterval(pollCodex, 30 * 1000); pollCodex();
 
 /* ---------- 额度详情弹层(点会话额度卡打开): 全部限额 + 历史走势 ---------- */
-const USG_SERIES = [
-  { k: 's', label: '会话', color: 'var(--accent)', hex: '#F59E0B' },
-  // hold: 断档期间"值保持不动"的线。周额度一周内只增不减, 没用它就不会动 -> 断档可以补齐;
-  // 会话额度 5 小时就滚动重置, 断档期间几乎必然变过 -> 不补, 断着才是实话。
-  { k: 'w', label: '周额度', color: '#5B9CF5', hex: '#5B9CF5', hold: true },
-  { k: 'o', label: 'Opus', color: '#B48CF2', hex: '#B48CF2', hold: true },
-];
+const USG_COLORS = ['#5B9CF5', '#B48CF2', '#F59E0B', '#4FB6A5', '#F87171'];
+let usgSeries = [];
+function syncUsageSeries(d) {
+  const lims = (d && d.limits) || [];
+  usgSeries = lims.map((l, i) => ({
+    k: l.key,
+    label: l.label || l.name || l.limitId || 'Codex',
+    hex: USG_COLORS[i % USG_COLORS.length],
+    // 长周期额度在电脑关机时不会自己变化；只有重置时间没跨过去才允许横向补齐。
+    hold: (l.windowMins || 0) >= 24 * 60,
+    windowMins: l.windowMins || 0,
+  }));
+}
 let usgHours = 24;
 // 0 = 全部历史(服务端永久保留, 点多了会分桶抽稀后再给)
 const USG_RANGES = [[1, '1 小时'], [6, '6 小时'], [12, '12 小时'], [24, '24 小时'], [24 * 7, '7 天'], [24 * 30, '30 天'], [0, '全部']];
@@ -345,28 +376,22 @@ function fmtAgo(ms) {
   const m = Math.round(ms / 60000);
   return m < 1 ? '刚刚' : m < 60 ? m + ' 分钟前' : Math.floor(m / 60) + ' 小时 ' + (m % 60) + ' 分前';
 }
-function usgKindLabel(l) {
-  if (l.kind === 'session') return '会话额度 · 5 小时滚动';
-  if (l.kind === 'weekly_all') return '周额度 · 全部模型';
-  if (l.kind === 'weekly_scoped') return ((l.scope && l.scope.model && l.scope.model.display_name) || 'Opus') + ' · 周额度';
-  return l.kind || '未知限额';
-}
+function usgKindLabel(l) { return l.label || shortLimitName(l); }
 /* 按最近 1 小时的用量增速, 预估还有多久到 100%(给周额度卡用)。
    基准取"1 小时前那一刻"的采样值, 现值取限额接口的实时 percent, 算 %/小时后线性外推。
-   history 点: {t, s:会话%, w:周%, o:Opus%}; 期间若掉一大截视为重置过、不给预估。 */
-const USG_KIND_KEY = { session: 's', weekly_all: 'w', weekly_scoped: 'o' };
-function projToFull(kind, curPct, history) {
-  const key = USG_KIND_KEY[kind];
+   history 点: {t,b:{额度桶key:%},r:{额度桶key:重置时间}}；期间若掉一大截视为重置过、不给预估。 */
+function histVal(p, key) { return p && p.b ? p.b[key] : null; }
+function projToFull(key, curPct, history) {
   if (!key || curPct == null) return null;
   const now = Date.now(), winStart = now - 3600 * 1000;
-  const pts = (history || []).filter(p => p[key] != null);
+  const pts = (history || []).filter(p => histVal(p, key) != null);
   if (!pts.length) return null;
   let base = null;                                   // 窗口起点前最后一个点 = 1 小时前的值; 没有就用最早的点
   for (const p of pts) { if (p.t <= winStart) base = p; else break; }
   if (!base) base = pts[0];
   const dtH = (now - base.t) / 3600000;
   if (dtH < 1 / 12) return null;                      // 跨度不足 5 分钟, 估不准
-  const dv = curPct - base[key];
+  const dv = curPct - histVal(base, key);
   if (dv < -0.5) return { reset: true };              // 掉一大截 = 期间重置过
   const rate = dv / dtH;                              // %/小时
   if (rate < 0.05) return { flat: true };             // 基本不涨
@@ -377,9 +402,9 @@ function fmtDur(h) {
   if (h >= 10) return Math.round(h) + ' 小时';
   return (Math.round(h * 10) / 10) + ' 小时';
 }
-function projLine(kind, curPct, history) {
+function projLine(key, curPct, history) {
   if (curPct != null && curPct >= 100) return '<div class="proj crit">⏳ 已到本周上限</div>';
-  const p = projToFull(kind, curPct, history);
+  const p = projToFull(key, curPct, history);
   if (!p) return '<div class="proj dim">⏳ 近 1 时样本不足 · 暂无预估</div>';
   if (p.reset) return '<div class="proj dim">⏳ 近 1 小时内已重置 · 重新累积中</div>';
   if (p.flat) return '<div class="proj dim">⏳ 近 1 小时基本不涨</div>';
@@ -400,19 +425,19 @@ function drawUsageChart(d) {
   let out = [25, 50, 75, 100].map(v =>
     `<line x1="0" x2="1000" y1="${Y(v)}" y2="${Y(v)}" stroke="#1a212c" stroke-width="1" vector-effect="non-scaling-stroke"/>`).join('');
   /* 断档怎么画:
-     - hold 线(周额度/Opus): 按上一个值平推过断档, 到下一个采样点再阶跃 —— 一周内它只增不减, 没人用就不动;
-       但若断档后的值反而更低, 说明这中间重置过、掉在哪一刻无从得知 -> 照旧断开, 不瞎连。
-     - 会话额度: 5 小时滚动, 断档期间必然变过 -> 一律断开。 */
-  for (const s of USG_SERIES) {
-    let dstr = '', prevT = 0, prevV = 0;
+     - 长周期线: 仅当重置时间仍相同，才按上一个值平推过断档，到下一个采样点再阶跃；
+     - 重置时间变了或短周期窗口: 断档期间发生了什么无法确认，一律断开，不做假插值。 */
+  for (const s of usgSeries) {
+    let dstr = '', prevT = 0, prevV = 0, prevReset = null;
     for (const p of hist) {
-      const v = p[s.k];
+      const v = histVal(p, s.k);
       if (v == null) { prevT = 0; continue; }
       const x = X(p.t).toFixed(1), y = Y(v).toFixed(1);
       const gap = prevT && p.t - prevT > gapMs;
-      if (gap && s.hold && v + 0.5 >= prevV) dstr += `L${x},${Y(prevV).toFixed(1)}L${x},${y}`;   // 平推到断档末端再阶跃
+      const reset = p.r && p.r[s.k];
+      if (gap && s.hold && reset === prevReset && v + 0.5 >= prevV) dstr += `L${x},${Y(prevV).toFixed(1)}L${x},${y}`;   // 同一周期才平推
       else dstr += `${!prevT || gap ? 'M' : 'L'}${x},${y}`;
-      prevT = p.t; prevV = v;
+      prevT = p.t; prevV = v; prevReset = reset;
     }
     if (dstr) out += `<path d="${dstr}" fill="none" stroke="${s.hex}" stroke-width="2.6" vector-effect="non-scaling-stroke" stroke-linejoin="round" stroke-linecap="round"/>`;
   }
@@ -451,11 +476,11 @@ function drawUsageChart(d) {
      相邻不足一个标签高就对半推开、迭代到收敛, 最后整体夹回框内。推开后仍靠颜色对应到各自的线。 */
   const nowEl = $('#usgNow');
   if (nowEl) {
-    const curOf = { s: d.usage && d.usage.session, w: d.usage && d.usage.weekAll, o: d.usage && d.usage.weekScoped };
+    const curOf = new Map(((d && d.limits) || []).map(l => [l.key, l]));
     const items = [];
-    for (const s of USG_SERIES) {
-      let v = curOf[s.k] ? curOf[s.k].pct : null;
-      if (v == null) { for (let i = hist.length - 1; i >= 0; i--) { if (hist[i][s.k] != null) { v = hist[i][s.k]; break; } } }
+    for (const s of usgSeries) {
+      let v = curOf.get(s.k) ? curOf.get(s.k).pct : null;
+      if (v == null) { for (let i = hist.length - 1; i >= 0; i--) { const hv = histVal(hist[i], s.k); if (hv != null) { v = hv; break; } } }
       if (v == null) continue;
       items.push({ hex: s.hex, v, y: Y(v) / 300 * 100 });     // y = 理想位置(占框高的 %)
     }
@@ -491,22 +516,20 @@ function drawUsageChart(d) {
 async function renderUsageOvl() {
   const d = await get('/api/usage/detail?hours=' + usgHours);
   if (!d || ovlKind !== 'usage') return;
+  syncUsageSeries(d);
   drawUsageChart(d);
-  /* 图例第三项跟随实际限定模型名(Opus/Fable…) */
-  const scLb = d.usage && d.usage.weekScoped && d.usage.weekScoped.label;
-  const lg = $$('#usgLegend span');
-  if (scLb && lg.length === 3) lg[2].innerHTML = `<i style="background:#B48CF2"></i>${esc(scLb)}`;
-  /* 各限额卡: 用接口原样的 limits 列表, 有几条画几条 */
+  $('#usgLegend').innerHTML = usgSeries.map(s => `<span><i style="background:${s.hex}"></i>${esc(s.label)}</span>`).join('');
+  /* 各限额卡: Codex 官方返回几种额度就画几条，兼容主额度/模型额度/未来短周期额度。 */
   const sevCls = s => s === 'critical' || s === 'exceeded' ? 'crit' : (s === 'warning' || s === 'high' ? 'warn' : '');
   const lims = (d.limits && d.limits.length) ? d.limits : null;
-  const rows = lims ? lims.map(l => {
-    const pct = Math.round(l.percent || 0);
-    const rst = l.resets_at ? Date.parse(l.resets_at) : null;
-    const color = l.kind === 'weekly_all' ? '#5B9CF5' : l.kind === 'weekly_scoped' ? '#B48CF2' : 'var(--accent)';
-    // 周额度(全部模型/Opus)才给"还有多久到 100%"的预估; 会话额度 5 小时就重置, 不外推
-    const isWeek = l.kind === 'weekly_all' || l.kind === 'weekly_scoped';
+  const rows = lims ? lims.map((l, i) => {
+    const pct = Math.round(l.pct || 0);
+    const rst = l.resetsAt || null;
+    const color = (usgSeries[i] && usgSeries[i].hex) || USG_COLORS[i % USG_COLORS.length];
+    // 只对 7 天及以上限额做一小时速度外推；短窗口滚动太快，外推没有实际意义。
+    const isWeek = (l.windowMins || 0) >= 7 * 24 * 60;
     // 用 recent(近 100 分钟原始点)而不是 history: 长档位的 history 被抽稀过, 拿它算速度会失真
-    const proj = isWeek ? projLine(l.kind, l.percent, d.recent || d.history) : '';
+    const proj = isWeek ? projLine(l.key, l.pct, d.recent || d.history) : '';
     return `<div class="usg-limit">
       <div class="row"><span class="nm">${esc(usgKindLabel(l))}</span><b class="pv ${sevCls(l.severity)}">${pct}%</b></div>
       <div class="hbar"><i style="width:${Math.min(100, pct)}%;background:${color}"></i></div>
@@ -522,23 +545,28 @@ async function renderUsageOvl() {
   const thin = d.historyShown && d.history && d.history.length < d.historyShown ? ' · 图取 ' + d.history.length + ' 点' : '';
   const from = d.historyFrom && !thin ? ', 起自 ' + fmtDay(d.historyFrom) : '';   // 抽稀时挤不下"起自", 让位(全部档 x 轴左端本来就写着起始日)
   metas.push(['历史样本', (d.historyTotal || 0) + ' 点 · ' + fmtKB(d.historyBytes) + ' · 永久留存' + from + thin]);
-  if (d.tokenExpiresAt) {
-    const min = Math.round((d.tokenExpiresAt - Date.now()) / 60000);
-    metas.push(['OAuth 令牌', min <= 0 ? '已过期' : fmtLeft(d.tokenExpiresAt - Date.now()).replace('后', '') + '后到期']);
-  }
-  if (d.error) metas.push(['状态', '⚠ ' + d.error]);
+  const u = d.usage || {}, sm = u.summary || {};
+  if (u.latestDayDate) metas.push([(u.latestDayDate.slice(5).replace('-', '/') + ' token'), fmtTokens(u.latestDayTokens)]);
+  else if (u.todayTokens != null) metas.push(['今日 token', fmtTokens(u.todayTokens)]);
+  if (u.weekTokens != null) metas.push(['近 7 日 token', fmtTokens(u.weekTokens)]);
+  if (sm.lifetimeTokens != null) metas.push(['累计 token', fmtTokens(sm.lifetimeTokens)]);
+  if (sm.longestRunningTurnSec != null) metas.push(['最长任务', Math.round(sm.longestRunningTurnSec / 60) + ' 分钟']);
+  if (sm.currentStreakDays != null) metas.push(['连续使用', sm.currentStreakDays + ' 天']);
+  if (u.resetCredits && u.resetCredits.availableCount != null) metas.push(['可用额度重置', u.resetCredits.availableCount + ' 次']);
+  if (u.tokenActivityError) metas.push(['token 活动', '暂不可用']);
+  if (d.error) metas.push(['刷新状态', d.limits && d.limits.length ? '上次有效值 · 正在重试' : '暂不可用 · 正在重试']);
   $('#usgSide').innerHTML = rows +
     `<div class="usg-meta">${metas.map(m => `<div class="mrow"><span>${esc(m[0])}</span><b>${esc(m[1])}</b></div>`).join('')}</div>`;
 }
 function openUsageOvl() {
-  openOvl('usage', 'CLAUDE CODE 用量', '官方 oauth/usage · 每分钟拉取、值变即记点 · 百分比为整数精度', `
+  openOvl('usage', 'CODEX 用量', '官方 Codex App Server · 每分钟只读采样 · 限额桶动态识别', `
     <div id="usgOvl">
       <div id="usgLeft">
         <svg id="usgChart" viewBox="0 0 1000 300" preserveAspectRatio="none"></svg>
         <div id="usgNow"></div>
         <div id="usgYlab"><span style="top:6.7%">100</span><span style="top:29.2%">75</span><span style="top:51.7%">50</span><span style="top:74.2%">25</span></div>
         <div id="usgXlab"></div>
-        <div id="usgLegend">${USG_SERIES.map(s => `<span><i style="background:${s.hex}"></i>${s.label}</span>`).join('')}</div>
+        <div id="usgLegend"></div>
         <div id="usgEmpty">历史采样中 · 额度每次刷新自动记一个点</div>
         <div id="usgRanges">${USG_RANGES.map(([h, n]) =>
           `<div class="range-btn press-sm ${h === usgHours ? 'on' : ''}" data-h="${h}">${n}</div>`).join('')}</div>
@@ -555,9 +583,29 @@ function openUsageOvl() {
 }
 $('#usageCard').addEventListener('pointerup', () => { if (!dragging) openUsageOvl(); });
 
-/* ==================== ⓪ Claude 会话页 ==================== */
+/* ==================== ⓪ Codex 会话页 ==================== */
 const CS_KIND = { approve: '等你批授权', choose: '等你选选项', reply: '等你回复' };
 const CS_CHIP = { running: '运行中', waiting: '等你操作', done: '已完成' };
+/* 设备配色: 两台机器的对话混在一列里, 靠颜色+短标一眼分开。
+   没登记过的设备名会走 hash 兜底配色, 以后再接第三台也不用改代码。 */
+const CS_DEV_COLOR = { 'PC': '#5B9CF5', 'Windows': '#4FB6A5', 'Mac': '#B48CF2' };
+const CS_DEV_FALLBACK = ['#4FB6A5', '#E08B4F', '#C77DBB', '#7C9BE0'];
+function csDevLabel(d) {
+  return String(d || 'PC').replace(/\s*·\s*Codex\s*$/i, '');
+}
+function csDevColor(d) {
+  if (CS_DEV_COLOR[d]) return CS_DEV_COLOR[d];
+  let h = 0; for (const ch of String(d || '')) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return CS_DEV_FALLBACK[h % CS_DEV_FALLBACK.length];
+}
+/* 已读键带上设备: 两台机器的短 sid 理论上会撞, 撞了就会"我标了这台的已读, 那台的卡也没了" */
+function csKey(s) { return (s.device || 'PC') + ':' + s.sid; }
+/* MCP 工具名原样是 mcp__Claude_Browser__javascript_tool 这种, 又长又难读 -> 压成「服务 · 方法」。
+   动作文案是 hook 从 PreToolUse 现算的, 普通工具已经是"读 xx / 改 xx / $ 命令"了, 只需收拾 MCP 这类。 */
+function csAct(t) {
+  const m = String(t || '').match(/^(?:用\s+)?mcp__([^_]+(?:_[^_]+)*?)__(.+)$/);
+  return m ? m[1].replace(/_/g, ' ') + ' · ' + m[2].replace(/_/g, ' ') : t;
+}
 function csAge(ms) { const m = Math.round(ms / 60000); return m < 1 ? '刚刚' : m + ' 分钟前'; }
 /* 已读表: sid -> 知悉时刻的事件 ts。会话再动 ts 就变新 -> 自动重新算"未读" */
 let csRead = {};
@@ -570,18 +618,30 @@ function csMarkRead(sid, ts) {
   csSig = ''; pollSessions();
 }
 let csSig = '', csLast = null;
+async function getSessionSnapshot() {
+  /* supervisor 是 Codex 会话的唯一汇总层：本机 hooks/App Server 与 Mac 中继事件都在这里。
+     旧 /api/claude/sessions 只作 supervisor 暂时不可达时的本机兜底，避免管理台重启瞬间整页闪空。 */
+  try {
+    const res = await fetch('http://127.0.0.1:3778/api/sessions', { cache: 'no-store' });
+    if (res.ok) return await res.json();
+  } catch { /* 退回 3777 本机快照 */ }
+  return await get('/api/claude/sessions');
+}
 async function pollSessions() {
-  const r = await get('/api/claude/sessions'); if (!r) return;
+  const r = await getSessionSnapshot(); if (!r) return;
   csLast = r;
   const c = r.counts || {};
   /* 已完成且点过"知悉"的隐藏; 会话若有新动静(ts 更新)会自动重新出现 */
-  const list = (r.sessions || []).filter(s => !(s.status === 'done' && csRead[s.sid] >= s.ts));
+  const list = (r.sessions || []).filter(s => !(s.status === 'done' && csRead[csKey(s)] >= s.ts));
   const hidden = (r.sessions || []).length - list.length;
   $('#csTotal').textContent = Math.max(0, (c.total || 0) - hidden);
   $('#csRunning').textContent = c.running || 0;
   $('#csWaiting').textContent = c.waiting || 0;
   $('#csWaitWrap').classList.toggle('warn', (c.waiting || 0) > 0);
-  const name = s => s.title || s.proj;
+  // 项目目录只用于诊断，不是会话名。正式标题来自 App Server thread.name；
+  // name 尚未生成时显示中性文案，绝不把 PCB学习/mywork 之类项目名顶上来。
+  const name = s => s.displayName || s.title || (s.source === 'codex'
+    ? (s.titleUnavailable ? 'Mac 本地会话（标题未同步）' : 'Codex 对话') : '会话');
   /* msg 行: 有等待的就"叫", 否则安静地报最新会话 */
   const w = list.find(s => s.status === 'waiting');
   const msgEl = $('#csMsg');
@@ -600,21 +660,37 @@ async function pollSessions() {
   $('#csRunN').textContent = running.length;
   $('#csDoneN').textContent = done.length;
   /* 内容签名没变就不动 DOM(分钟数进签名, 年龄跳分钟时刷新) */
-  const sig = JSON.stringify(list.map(s => [s.sid, s.status, s.ts, s.title, s.detail, (s.reply || '').slice(0, 60), Math.floor((r.t - s.ts) / 60000)]));
+  const sig = JSON.stringify(list.map(s => [s.device, s.sid, s.status, s.ts, s.title, s.titleUnavailable, s.detail, s.lastAct, (s.reply || '').slice(0, 60), Math.floor((r.t - s.ts) / 60000)]));
   if (sig === csSig) return;
   csSig = sig;
   const card = s => {
+    /* 「正在干什么」: detail 是 hook 从 PreToolUse 的 tool_input 现算的(读 xx / 改 xx / $ 命令…)。
+       工具跑完事件就变 thinking、detail 归空 —— 那时退回显示 lastAct(刚做完的那件事),
+       否则一句干巴巴的"思考中…"什么信息都没有。 */
     const act = s.status === 'waiting'
       ? `<div class="act warn">⚠ ${esc(CS_KIND[s.kind] || '等你操作')}${s.tool ? ' · approve: ' + esc(s.tool) : ''}</div>`
-      : `<div class="act">${s.detail ? esc(s.detail) : (s.status === 'running' ? '思考中…' : '')}</div>`;
-    return `<div class="cs-card ${s.status}" ${s.status === 'done' ? `data-ack="${esc(s.sid)}" data-ts="${s.ts}"` : ''}>
-      <div class="head"><span class="proj">${esc(name(s))}</span><span class="sid">#${esc(s.sid)}</span>
+      : s.detail
+        ? `<div class="act live">▶ ${esc(csAct(s.detail))}</div>`
+        : s.status === 'running'
+          ? `<div class="act">思考中…${s.lastAct ? ' · 刚 ' + esc(csAct(s.lastAct)) : ''}</div>`
+          : `<div class="act">${s.lastAct ? '最后动作: ' + esc(csAct(s.lastAct)) : ''}</div>`;
+    const dev = s.device || 'PC';
+    const devLabel = csDevLabel(dev);
+    return `<div class="cs-card ${s.status}" ${s.status === 'done' ? `data-ack="${esc(csKey(s))}" data-ts="${s.ts}"` : ''}
+        style="--dev:${csDevColor(dev)}">
+      <div class="head"><span class="cs-dev">${esc(devLabel)}</span><span class="proj">${esc(name(s))}</span><span class="sid">#${esc(s.sid)}</span>
         <span class="cs-chip ${s.status}">${CS_CHIP[s.status]}</span><span class="age">${csAge(r.t - s.ts)}</span></div>
       ${act}
       <div class="reply">${s.reply ? '<b>最后回复:</b>' + esc(s.reply) : '<b>暂无回复文本</b>'}</div>
       ${s.status === 'done' ? '<div class="ack">✓ 已完成 · 点一下标记已读</div>' : ''}
     </div>`;
   };
+  /* 设备小计: 「PC 2 · Mac 1」；只有一台设备时不显示。 */
+  const bd = r.byDevice || {};
+  const devs = Object.keys(bd);
+  $('#csDevs').innerHTML = devs.length > 1
+    ? devs.map(d => `<span style="--dev:${csDevColor(d)}"><i></i>${esc(csDevLabel(d))} <b>${bd[d].total}</b>${bd[d].waiting ? ' ⚠' + bd[d].waiting : ''}</span>`).join('')
+    : '';
   $('#csRunBody').innerHTML = running.map(card).join('') || '<div class="empty">无运行中会话</div>';
   $('#csDoneBody').innerHTML = done.map(card).join('') || '<div class="empty">无已完成会话</div>';
   /* 已完成卡: 点按知悉 -> 渐隐消失 */
@@ -624,7 +700,7 @@ async function pollSessions() {
     setTimeout(() => csMarkRead(el.dataset.ack, Number(el.dataset.ts)), 250);
   }));
 }
-setInterval(pollSessions, 2000); pollSessions();
+setInterval(pollSessions, 5000); pollSessions();
 $('#csUsage').addEventListener('pointerup', () => { if (!dragging) openUsageOvl(); });
 $('#csUsageBtn').addEventListener('pointerup', () => openUsageOvl());
 
@@ -737,7 +813,7 @@ function renderExtras() {
   } else { $('#healthName').textContent = '服务器未配置'; $('#healthMeta').textContent = '管理台可设置健康检查地址'; }
 }
 async function pollExtras() { extras = await get('/api/extras'); renderExtras(); renderTiles(); }
-setInterval(pollExtras, 2000); pollExtras();
+setInterval(pollExtras, 5000); pollExtras();
 
 /* 全局热键翻页: 弹层开着时强制关闭并翻页(不用先手动退出); 游戏副驾驶页仍不翻 */
 function wideFlip(dir) {
@@ -1177,7 +1253,7 @@ async function pollGuard() {
     $('#gRun').textContent = `本次已运行 ${Math.floor(s / 60)} 分钟`;
   }
 }
-setInterval(pollGuard, 2000); pollGuard();
+setInterval(pollGuard, 5000); pollGuard();
 async function pollFps() {
   if (!gameOn) return;
   const f = await get('/api/fps'); if (!f) return;
